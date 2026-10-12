@@ -13,6 +13,7 @@ import { demoState } from './demo.js';
 import { ActivityLog } from './activity.js';
 import { openBrowser } from './browser.js';
 import { getAbout } from './about.js';
+import { OperationCoordinator } from './operations.js';
 
 export function initialState(root) {
   return {
@@ -28,6 +29,7 @@ export class Dashboard {
     this.state = options.demo ? demoState() : initialState(root);
     if (options.demo) this.state.control = demoControl();
     this.options = options;
+    this.operations = options.operations || new OperationCoordinator();
     this.input = options.input || process.stdin;
     this.output = options.output || process.stdout;
     this.running = false;
@@ -178,14 +180,21 @@ export class Dashboard {
     if (this.state.busy) return;
     if (this.state.demo) { this.note('Demo only. No files or remote repositories were changed.'); return; }
     const controller = new AbortController();
+    let release;
+    try { release = this.operations.acquire(label, controller); }
+    catch (error) { this.note(error.message, 'warn'); return; }
     this.controller = controller;
     this.state.busy = label;
     this.state.modal = null;
     this.epoch++;
     this.state.operationLog = [];
-    let pending = '';
+    let pending = '', outputBytes = 0, outputTruncated = false;
     const onOutput = chunk => {
-      pending += chunk;
+      const buffer = Buffer.from(String(chunk));
+      const available = Math.max(0, 256 * 1024 - outputBytes);
+      if (buffer.length > available) outputTruncated = true;
+      outputBytes += Math.min(buffer.length, available);
+      pending += buffer.subarray(0, available).toString('utf8');
       const records = pending.split(/[\r\n]+/);
       pending = records.pop() || '';
       for (const line of records.filter(Boolean)) {
@@ -198,20 +207,25 @@ export class Dashboard {
     this.draw();
     try {
       const value = await fn({ signal: controller.signal, onOutput });
-      if (pending) onOutput('\n');
-      if (controller.signal.aborted && !value?.cancelled) throw new Error('Operation cancelled.');
+      if (pending) { this.state.operationLog.push(clean(pending)); pending = ''; }
+      if (outputTruncated) this.state.operationLog.push('[Output truncated at 256 KB.]');
+      this.state.operationLog = this.state.operationLog.slice(-120);
+      if (controller.signal.aborted && !value?.cancelled && !value?.status) throw new Error('Operation cancelled.');
       if (value && typeof value.code === 'number' && value.code !== 0) throw new Error(`${label} exited with code ${value.code}. Review the task output.`);
-      const warning = value?.cancelled || value?.scanMayContinue || value?.warnings?.length || value?.errors?.length || ['partial', 'requested', 'attention-required'].includes(value?.status);
+      const warning = value?.cancelled || value?.scanMayContinue || value?.warnings?.length || value?.errors?.length || ['partial', 'requested', 'uncertain', 'attention-required'].includes(value?.status) || controller.signal.aborted;
       if (this.running) this.note(value?.message || (value?.cancelled ? `${label} cancelled; partial results preserved.` : `${label} completed.`), warning ? 'warn' : 'good');
       return value;
     } catch (error) {
-      if (pending) onOutput('\n');
+      if (pending) { this.state.operationLog.push(clean(pending)); pending = ''; }
+      if (outputTruncated) this.state.operationLog.push('[Output truncated at 256 KB.]');
+      this.state.operationLog = this.state.operationLog.slice(-120);
       this.note(controller.signal.aborted ? 'Cancelled. Any completed changes remain; refresh to review them.' : friendlyError(error), controller.signal.aborted ? 'warn' : 'bad');
       return undefined;
     } finally {
       if (this.controller === controller) this.controller = null;
       this.state.busy = null;
       this.state.lastRefresh = new Date().toISOString();
+      release();
       this.draw();
     }
   }
@@ -494,8 +508,8 @@ export class Dashboard {
     if (!status) return;
     if (!status.available) return this.note(status.warning || 'No sound output is available.', 'warn');
     const apply = settings => this.confirm('Change sound output', `${settings.volume === undefined ? `${settings.muted ? 'Mute' : 'Unmute'} the default output.` : `Volume: ${Math.round(status.volume)}% -> ${settings.volume}%`}\nThis affects the current default Windows output device.`, async () => {
-      const result = await this.runTask('Changing sound output', options => audio.setAudioSettings({ ...settings, confirmed: true }, options));
-      if (result) { this.state.control ||= {}; this.state.control.audio = result; this.note(`Sound: ${Math.round(result.volume)}%${result.muted ? ', muted' : ', unmuted'}.`); }
+      const result = await this.runTask('Changing sound output', options => audio.setAudioSettings({ ...settings, ...(status.defaultDeviceId ? { deviceId: status.defaultDeviceId } : {}), confirmed: true }, options));
+      if (result) { this.state.control ||= {}; this.state.control.audio = result; this.note(result.message || `Sound: ${Math.round(result.volume)}%${result.muted ? ', muted' : ', unmuted'}.`, result.warnings?.length || ['partial', 'uncertain', 'requested'].includes(result.status) ? 'warn' : 'good'); }
     });
     if (action === 'mute') apply({ muted: !status.muted });
     else this.prompt('Adjust sound volume', 'Volume from 0 to 100', String(Math.round(status.volume)), value => {
@@ -693,7 +707,7 @@ export class Dashboard {
     if (name === 'b') {
       if (!this.webServer) {
         const { startServer } = await import('./server.js');
-        this.webServer = await startServer({ root: s.root, demo: s.demo, activity: this.activity });
+        this.webServer = await startServer({ root: s.root, demo: s.demo, activity: this.activity, operations: this.operations });
       }
       try { await openBrowser(this.webServer.url); this.note('Browser dashboard opened. It closes when this Jarvis session exits.'); }
       catch { this.showText('Open the local dashboard', this.webServer.url); }

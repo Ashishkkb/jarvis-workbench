@@ -11,10 +11,10 @@ npm test
 npm run check
 node ./bin/jarvis.js --demo
 node ./bin/jarvis.js --web --demo
-npm pack --dry-run
+npm run test:package
 ```
 
-To test source installation, run `npm install -g .` and then `jarvis --demo`. The planned `@ashishkkb/jarvis-workbench` registry package is not yet published; do not document registry installation as an available release until publication is verified.
+`npm run test:package` builds a real archive, installs it offline into a unique temporary prefix, exercises both commands, library imports and the local browser, then uninstalls it. It leaves your normal global installation untouched. To test source installation separately, run `npm install -g .` and then `jarvis --demo`. The planned `@ashishkkb/jarvis-workbench` registry package is not yet published; do not document registry installation as an available release until publication is verified.
 
 ## Change expectations
 
@@ -32,10 +32,10 @@ Use generated temporary fixtures for Git mutations, cleanup, link handling, inte
 
 For storage changes, cover changed-file checks, containment, symbolic links/junctions, confirmation, partial cancellation, persistent manifest recovery, no-overwrite restoration, and refusal of unsafe purge entries. Test both native ripgrep and the built-in search fallback when changing search behavior.
 
-CI runs the test suite, syntax checks, and package dry-run on Node 22 and 24 across Ubuntu, Windows, and macOS. Native OS checks still matter: a mocked parser test alone does not establish that an external utility is present or behaves identically on every machine.
+CI runs the test suite, syntax checks, and a real offline tarball install, consumer smoke test and uninstall on Node 22 and 24 across Ubuntu, Windows, and macOS. On Windows it also parses every packaged native PowerShell helper and probes native read-only status without executing system changes. Explicit hardware or policy unavailability is recorded separately from failures. Native OS checks still matter: a mocked parser test alone does not establish that an external utility is present or behaves identically on every machine.
 
 ## Releases
 
-Before publishing, verify the supported CI matrix, browser and terminal smoke tests, package contents, version, license, security notes, and install/uninstall behavior from the generated tarball. Confirm ownership of the npm scope and GitHub destination. Publishing a registry release is a separate authorized action; `npm pack` only creates a local archive.
+Follow [RELEASING.md](RELEASING.md). Before publishing, verify the supported CI matrix, browser and terminal smoke tests, package contents, version, license, security notes, and install/uninstall behavior from the generated tarball. Confirm ownership of the npm scope and GitHub destination. Publishing a registry release is a separate authorized action; `npm pack` only creates a local archive.
 
 Maintain accurate claims: metadata scans are not malware detection, quarantine does not free disk space, and there is no guaranteed amount of space to recover. Leave donation destinations unset until the owner supplies and verifies them. Report security issues using [SECURITY.md](SECURITY.md).

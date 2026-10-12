@@ -62,7 +62,7 @@ const state = {
   processes: null, processFilter: '', processSort: 'memory', ports: null, portFilter: '', scripts: [], recipes: [],
   storage: { locations: [], history: [], path: '', scan: null, selected: new Set(), tab: 'overview', stale: false },
   network: null, audio: null, security: null, settings: null,
-  activeJob: null, jobs: new Map(), loading: false, requestId: 0, controller: null, toastTimer: null,
+  activeJob: null, loading: false, requestId: 0, controller: null, toastTimer: null,
 };
 const $ = selector => document.querySelector(selector);
 const page = $('#page');
@@ -148,27 +148,44 @@ function duration(value) {
 function badge(text, tone = '', name) { return el('span', { class: `badge ${tone}` }, name ? icon(name) : null, text); }
 function notice(text, tone = '', name = 'info') { return el('div', { class: `notice ${tone}`, role: tone === 'error' ? 'alert' : 'note' }, icon(name), el('span', {}, text)); }
 
-async function api(endpoint, { method = 'GET', body, signal } = {}) {
-  if (!token) throw new Error('Open Jarvis from your terminal to connect this browser securely.');
-  let response;
-  try {
-    response = await fetch(endpoint, {
-      method, signal, credentials: 'omit', cache: 'no-store',
-      headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-  } catch (error) {
-    if (error.name === 'AbortError') throw error;
-    throw new Error('The local server is not responding. Keep Jarvis running in your terminal, then try again.');
+async function api(endpoint, { method = 'GET', body, signal, requestId } = {}) {
+  if (!token) throw new Error('Open the browser link from your Jarvis terminal to connect securely.');
+  const sensitive = endpoint === '/api/network/password';
+  const key = method === 'POST' && !sensitive ? requestId || crypto.randomUUID() : null;
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 45_000);
+    let response, value;
+    try {
+      response = await fetch(endpoint, {
+        method, signal: controller.signal, credentials: 'omit', cache: 'no-store',
+        headers: { Authorization: `Bearer ${token}`, ...(key ? { 'Idempotency-Key': key } : {}), ...(payload !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+        ...(payload !== undefined ? { body: payload } : {}),
+      });
+      value = await response.json();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // A mutation retry uses the SAME identity and payload. Passwords are never retried.
+      if (!timedOut && !sensitive && attempt === 0) continue;
+      throw new Error(method === 'POST' && !sensitive
+        ? 'The response was interrupted. The change may have started. Check task details or Activity before starting it again.'
+        : timedOut ? 'The local server took too long to respond. Keep Jarvis running and try refreshing.'
+          : 'The local server is not responding. Keep Jarvis running in your terminal, then try again.');
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener('abort', abort);
+    }
+    if (!response.ok) {
+      const error = new Error(value.error || `Request failed (${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    return value;
   }
-  let value;
-  try { value = await response.json(); } catch { throw new Error('The local server returned an unreadable response.'); }
-  if (!response.ok) {
-    const error = new Error(value.error || `Request failed (${response.status}).`);
-    error.status = response.status;
-    throw error;
-  }
-  return value;
 }
 
 function toast(message, error = false) {
@@ -636,12 +653,12 @@ function renderAudio() {
   volume.addEventListener('input', () => { output.textContent = `${volume.value}%`; });
   const apply = button('Apply volume', 'check', handle(async () => {
     apply.disabled = true;
-    try { const result = await api('/api/audio', { method: 'POST', body: { volume: Number(volume.value), confirmed: true } }); toast(result.message || 'Volume updated.'); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
+    try { const result = await api('/api/audio', { method: 'POST', body: { volume: Number(volume.value), ...(data.defaultDeviceId ? { deviceId: data.defaultDeviceId } : {}), confirmed: true } }); toast(result.message || 'Volume updated.', result.verified === false || result.warnings?.length ? 'warning' : false); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
     finally { apply.disabled = false; }
   }), 'primary');
   const mute = button(data.muted ? 'Unmute output' : 'Mute output', 'audio', handle(async () => {
     mute.disabled = true;
-    try { const result = await api('/api/audio', { method: 'POST', body: { muted: !data.muted, confirmed: true } }); toast(result.message || (data.muted ? 'Output unmuted.' : 'Output muted.')); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
+    try { const result = await api('/api/audio', { method: 'POST', body: { muted: !data.muted, ...(data.defaultDeviceId ? { deviceId: data.defaultDeviceId } : {}), confirmed: true } }); toast(result.message || (data.muted ? 'Output unmuted.' : 'Output muted.'), result.verified === false || result.warnings?.length ? 'warning' : false); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
     finally { mute.disabled = false; }
   }));
   const devices = data.devices || [];
@@ -948,43 +965,97 @@ async function launchAction(action, fields, title) {
     if (['overview', 'git', 'activity'].includes(state.screen)) await navigate(state.screen, { quiet: true });
   }, action);
 }
-async function launchJob(endpoint, body, title, onDone, kind) {
-  if (state.activeJob) throw new Error('Another task is running. Let it finish or cancel it before starting another.');
-  const result = await api(endpoint, { method: 'POST', body });
-  const job = { id: result.id, title, kind, status: 'running', logs: [], startedAt: new Date().toISOString(), onDone };
-  state.activeJob = job; state.jobs.set(job.id, job); renderJobDock(job);
-  void pollJob(job);
+function savedJob(key, value) {
+  try {
+    if (value === undefined) return JSON.parse(sessionStorage.getItem(key) || 'null');
+    if (value === null) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, JSON.stringify(value));
+  } catch { return null; }
+}
+function attachJob(result, { title, kind, onDone } = {}) {
+  const job = { ...result, title: title || result.action?.replaceAll('-', ' ') || 'Recovered task', kind: (kind || result.action) === 'storage-scan' ? 'scan' : kind || result.action, logs: [], status: result.status || 'running', startedAt: result.startedAt || new Date().toISOString(), onDone };
+  state.activeJob = job;
+  savedJob('jarvis-active-job', { id: job.id, title: job.title, kind: job.kind });
+  savedJob('jarvis-pending-job', null);
+  renderJobDock(job); void pollJob(job);
   return job;
 }
-async function pollJob(job) {
+async function recoverJobs() {
+  if (state.activeJob || state.launching) return;
+  const saved = savedJob('jarvis-active-job'), pending = savedJob('jarvis-pending-job');
+  const jobs = await api('/api/jobs');
+  const found = jobs.find(job => job.id === saved?.id || (pending?.requestId && job.requestId === pending.requestId)) || jobs.find(job => ['running', 'queued'].includes(job.status));
+  if (found) return attachJob(found, { ...(found.id === saved?.id ? saved : found.requestId === pending?.requestId ? pending : {}), onDone: async result => {
+    if (found.action === 'storage-scan' && result) {
+      state.storage.scan = result; state.storage.path = result.root || state.storage.path;
+      state.storage.selected.clear(); state.storage.stale = false; state.storage.tab = 'overview';
+    } else if (found.action.startsWith('cleanup')) await refreshStorageAfterChange();
+    await navigate(state.screen);
+  } });
+  if (saved || pending) {
+    savedJob('jarvis-active-job', null); savedJob('jarvis-pending-job', null);
+    toast('The previous task is no longer in this server session. Check Activity and the relevant tool before repeating a change.', 'warning');
+  }
+}
+async function launchJob(endpoint, body, title, onDone, kind) {
+  if (state.activeJob || state.launching) throw new Error('Another task is running. Let it finish or cancel it before starting another.');
+  state.launching = true;
+  const requestId = crypto.randomUUID();
+  savedJob('jarvis-pending-job', { requestId, title, kind });
   try {
-    const current = await api(`/api/jobs/${encodeURIComponent(job.id)}`);
-    Object.assign(job, current); renderJobDock(job);
+    const result = await api(endpoint, { method: 'POST', body, requestId });
+    return attachJob(result, { title, kind, onDone });
+  } catch (error) {
+    if (error.status) savedJob('jarvis-pending-job', null);
+    else {
+      // Recover an accepted request by identity; never submit a new mutation here.
+      try {
+        const jobs = await api('/api/jobs');
+        const found = jobs.find(job => job.requestId === requestId);
+        if (found) return attachJob(found, { title, kind, onDone });
+      } catch { /* Keep metadata for reconnection after a reload. */ }
+    }
+    throw error;
+  } finally { state.launching = false; }
+}
+async function pollJob(job) {
+  if (job.polling || job.handled) return;
+  clearTimeout(job.timer); job.polling = true;
+  try {
+    let current;
+    try { current = await api(`/api/jobs/${encodeURIComponent(job.id)}`); }
+    catch (error) {
+      job.connectionError = error.message;
+      if (error.status === 404) {
+        job.status = 'unknown'; job.handled = true;
+        job.connectionError = ''; job.error = 'This task is no longer available. Check Activity and the relevant tool before repeating a change.';
+        if (state.activeJob?.id === job.id) { state.activeJob = null; savedJob('jarvis-active-job', null); }
+        toast(job.error, 'warning');
+      } else if ((job.retries = (job.retries || 0) + 1) <= 5) {
+        job.timer = setTimeout(() => void pollJob(job), Math.min(15_000, 1000 * 2 ** (job.retries - 1)));
+      }
+      renderJobDock(job); return;
+    }
+    Object.assign(job, current); job.connectionError = ''; job.retries = 0; renderJobDock(job);
     if (modal.open && modal.dataset.job === job.id) fillJobModal(job);
     if (job.status === 'running' || job.status === 'queued') { job.timer = setTimeout(() => void pollJob(job), 850); return; }
-    if (state.activeJob?.id === job.id) state.activeJob = null;
+    job.handled = true;
+    if (state.activeJob?.id === job.id) { state.activeJob = null; savedJob('jarvis-active-job', null); }
     if (job.status === 'completed') {
       if (job.result?.code && job.result.code !== 0) toast(`${job.title} finished with exit code ${job.result.code}.`, true);
-      else if (job.kind === 'process-stop' && job.result?.status === 'requested') toast(job.result.message || 'Stop requested; the process has not exited yet.', 'warning');
-      else if (jobWarnings(job).length) toast('Task finished with notes. Open Details to review them.', 'warning');
-      else if (job.result?.message) toast(job.result.message);
-      else toast('Task completed.');
-      await job.onDone?.(job.result);
-    } else if (job.status === 'failed') {
-      toast(job.error || 'The task did not finish.', true);
-      if (job.kind !== 'scan' || job.result) await job.onDone?.(job.result);
-    }
-    else if (job.status === 'cancelled') {
-      toast(job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : job.result ? 'Task cancelled. Partial results are available.' : 'Task cancelled.', job.result?.scanMayContinue ? 'warning' : false);
-      if (job.kind !== 'scan' || job.result) await job.onDone?.(job.result);
-    }
+      else if (jobWarnings(job).length) toast(job.result?.message || 'Task finished with notes. Open Details to review them.', 'warning');
+      else toast(job.result?.message || 'Task completed.');
+    } else if (job.status === 'failed') toast(job.error || 'The task did not finish.', true);
+    else if (job.status === 'cancelled') toast(job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : job.result ? 'Task cancelled. Partial results are available.' : 'Task cancelled.', 'warning');
+    try {
+      if (job.status === 'completed' || job.kind !== 'scan' || job.result) await job.onDone?.(job.result);
+    } catch (error) { toast(`The task finished, but its view could not refresh: ${error.message}. Use Refresh to reload it.`, 'warning'); }
     if (state.screen === 'storage') renderStorage();
     try { state.activity = await api('/api/activity'); } catch { /* A refresh can retry activity. */ }
     if (state.screen === 'activity') renderActivity();
-  } catch (error) {
-    job.connectionError = error.message; renderJobDock(job);
-  }
+  } finally { job.polling = false; }
 }
+
 async function cancelJob() {
   const job = state.activeJob;
   if (!job) return;
@@ -995,9 +1066,9 @@ function renderJobDock(job) {
   const dock = $('#job-dock'); dock.hidden = false;
   const running = ['running', 'queued'].includes(job.status);
   const warnings = jobWarnings(job);
-  const message = job.connectionError || (running ? `Working locally · ${duration((Date.now() - new Date(job.startedAt).getTime()) / 1000)} elapsed` : job.status === 'failed' ? job.error || 'Open details for the error.' : job.status === 'cancelled' ? (job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : 'Cancelled. Any partial results are preserved.') : job.result?.code ? `Finished with exit code ${job.result.code}` : job.result?.message ? job.result.message : warnings.length ? 'Finished with notes. Review the task details.' : 'Completed on your computer.');
-  dock.replaceChildren(running && !job.connectionError ? el('span', { class: 'spinner' }) : icon(job.status === 'failed' || job.connectionError || warnings.length ? 'alert' : 'check'), el('div', { class: 'job-copy' }, el('strong', {}, job.title), el('p', {}, message)),
-    job.connectionError ? button('Reconnect', 'refresh', () => { job.connectionError = ''; void pollJob(job); }, 'small') : button('Details', null, () => openJobModal(job), 'small'),
+  const message = job.connectionError || (running ? `Working locally · ${duration((Date.now() - new Date(job.startedAt).getTime()) / 1000)} elapsed` : ['failed', 'unknown'].includes(job.status) ? job.error || 'Open details for the error.' : job.status === 'cancelled' ? (job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : 'Cancelled. Any partial results are preserved.') : job.result?.code ? `Finished with exit code ${job.result.code}` : job.result?.message ? job.result.message : warnings.length ? 'Finished with notes. Review the task details.' : 'Completed on your computer.');
+  dock.replaceChildren(running && !job.connectionError ? el('span', { class: 'spinner' }) : icon(['failed', 'unknown'].includes(job.status) || job.connectionError || warnings.length ? 'alert' : 'check'), el('div', { class: 'job-copy' }, el('strong', {}, job.title), el('p', {}, message)),
+    job.connectionError ? button('Reconnect', 'refresh', () => { job.connectionError = ''; job.retries = 0; void pollJob(job); }, 'small') : button('Details', null, () => openJobModal(job), 'small'),
     running ? button(job.kind === 'security-scan' ? 'Stop monitoring' : 'Cancel', null, handle(cancelJob), 'small') : iconButton('close', 'Dismiss completed task', () => { dock.hidden = true; }));
 }
 function openJobModal(job) {
@@ -1005,7 +1076,7 @@ function openJobModal(job) {
   modal.dataset.job = job.id; fillJobModal(job);
 }
 function jobWarnings(job) {
-  return [...new Set([...(['process-stop', 'network'].includes(job.kind) && job.result?.status === 'requested' ? [job.result.message || 'Stop requested; the process has not exited yet.'] : []), ...(job.result?.scanMayContinue ? ['Microsoft Defender may still be scanning. Check Windows Security for its current status.'] : []), ...(job.warnings || []), ...(job.activityWarning ? [job.activityWarning] : []), ...(job.result?.errors || []).map(error => typeof error === 'string' ? error : `${error.path || 'File'}: ${error.message || error.error || 'Needs review'}`)].filter(Boolean))];
+  return [...new Set([...(['partial', 'requested', 'uncertain', 'attention-required'].includes(job.result?.status) ? [job.result.message || 'This result needs review before continuing.'] : []), ...(job.result?.warnings || []), ...(job.result?.scanMayContinue ? ['Microsoft Defender may still be scanning. Check Windows Security for its current status.'] : []), ...(job.warnings || []), ...(job.activityWarning ? [job.activityWarning] : []), ...(job.result?.errors || []).map(error => typeof error === 'string' ? error : `${error.path || 'File'}: ${error.message || error.error || 'Needs review'}`)].filter(Boolean))];
 }
 function fillJobModal(job) {
   const holder = $('#job-modal-content'); if (!holder) return;
@@ -1016,6 +1087,9 @@ function fillJobModal(job) {
   const resultLabel = job.kind === 'process-stop' && result?.status === 'requested' ? 'Stop requested' : warnings.length ? `${job.status} with notes` : job.status;
   replace(holder, el('div', { class: 'preview-toolbar' }, badge(resultLabel, job.status === 'failed' ? 'bad' : warnings.length ? 'warn' : job.status === 'completed' ? 'good' : 'warn'), el('span', {}, `Started ${timestamp(job.startedAt)}`)), job.error ? notice(job.error, 'error') : null,
     warnings.map(warning => notice(warning, 'warning')),
+    result?.restoreInstruction ? notice(result.restoreInstruction, 'warning') : null,
+    result && (result.before || result.after) ? el('div', { class: 'review-details' }, definition([['Before', JSON.stringify(result.before || null)], ['After', JSON.stringify(result.after || null)]])) : null,
+    result?.destination ? el('div', { class: 'review-details' }, definition([['Destination', result.destination], ['Recovery record', result.recoveryId || 'None']])) : null,
     job.kind === 'process-stop' && result ? el('div', { class: 'review-details' }, definition([['Process', result.name], ['PID', result.pid], ['Result', result.message || result.status]])) : null,
     result && ['movedBytes', 'restoredBytes', 'reclaimedBytes'].some(key => result[key] !== undefined) ? el('div', { class: 'review-details' }, definition([['Moved to recovery', bytes(result.movedBytes || 0)], ['Restored', bytes(result.restoredBytes || 0)], ['Permanently removed', bytes(result.reclaimedBytes || 0)]])) : null,
     el('pre', { class: 'code-preview' }, logs || extra || (job.status === 'running' ? 'Waiting for task output…' : 'This task produced no console output.')), job.logTruncated ? el('p', { class: 'muted-caption' }, 'Older output was truncated to keep this view responsive.') : null, ['running', 'queued'].includes(job.status) ? button(job.kind === 'security-scan' ? 'Stop monitoring' : 'Cancel task', 'close', handle(cancelJob), 'small section-space') : null);
@@ -1052,6 +1126,7 @@ async function init() {
   renderNavigation();
   if (!token) { renderError(new Error('Start Jarvis in your project and use the browser link from your terminal. The local session keeps access on this computer.')); return; }
   await navigate('overview');
+  try { await recoverJobs(); } catch (error) { report(error); }
 }
 
 void init().catch(error => renderError(error));

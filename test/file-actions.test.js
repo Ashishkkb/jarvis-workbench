@@ -1,10 +1,12 @@
 import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { privateRecoveryDirectory, lockRecovery } from '../src/recovery-safety.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, readdir, lstat, symlink, link } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, readdir, lstat, symlink, link, chmod } from 'node:fs/promises';
 import { planFileAction, executeFileAction, listFileRecovery } from '../src/file-actions.js';
 
 async function fixture(t) {
@@ -219,4 +221,150 @@ test('pre-cancelled reviews and execution never create a destination', async t =
   const plan = await f.plan({ action: 'mkdir', path: 'new' });
   await assert.rejects(executeFileAction(plan, { confirmed: true, signal: controller.signal }), /cancelled/);
   await missing(path.join(f.root, 'new'));
+});
+
+
+async function interruptedProcess(f, request, checkpoint) {
+  const moduleUrl = new URL('../src/file-actions.js', import.meta.url).href;
+  const script = `import { planFileAction, executeFileAction } from ${JSON.stringify(moduleUrl)};
+    const [root,recoveryDir,request,checkpoint] = JSON.parse(process.argv[1]);
+    const plan = await planFileAction(root,request,{recoveryDir});
+    await executeFileAction(plan,{confirmed:true,onOutput(message){if(message.trim()===checkpoint)process.exit(77);}});
+    process.exit(78);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, JSON.stringify([f.root, f.recoveryDir, request, checkpoint])], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+  assert.equal(code, 77, stderr || 'Fixture child did not reach its selected crash boundary.');
+}
+
+test('a fresh process restores after crashes on either side of the recovery move', async t => {
+  for (const checkpoint of ['Exclusive recovery destination created.', 'Selection moved to recovery.']) {
+    const f = await fixture(t);
+    await writeFile(path.join(f.root, 'recover.txt'), 'complete original bytes');
+    await interruptedProcess(f, { action: 'trash', path: 'recover.txt' }, checkpoint);
+    const [history] = await listFileRecovery(f.root, { recoveryDir: f.recoveryDir });
+    assert.equal(history.available, true);
+    assert.equal(history.status, 'held');
+    await f.execute({ action: 'restore', recoveryId: history.id });
+    assert.equal(await readFile(path.join(f.root, 'recover.txt'), 'utf8'), 'complete original bytes');
+    assert.equal((await lstat(path.join(f.root, 'recover.txt'))).nlink, 1);
+    await missing(path.join(f.recoveryDir, history.id, 'item'));
+    assert.equal((await listFileRecovery(f.root, { recoveryDir: f.recoveryDir }))[0].status, 'restored');
+  }
+});
+
+test('crashed restores reconcile a duplicate link and recognize a completed restore after restart', async t => {
+  for (const checkpoint of ['Exclusive recovery destination created.', 'Selection restored to its original location.']) {
+    const f = await fixture(t);
+    await writeFile(path.join(f.root, 'recover.txt'), 'restore survives restart');
+    const { recoveryId } = await f.execute({ action: 'trash', path: 'recover.txt' });
+    await interruptedProcess(f, { action: 'restore', recoveryId }, checkpoint);
+    const [history] = await listFileRecovery(f.root, { recoveryDir: f.recoveryDir });
+    if (history.available) await f.execute({ action: 'restore', recoveryId });
+    else assert.equal(history.status, 'restored');
+    assert.equal(await readFile(path.join(f.root, 'recover.txt'), 'utf8'), 'restore survives restart');
+    assert.equal((await lstat(path.join(f.root, 'recover.txt'))).nlink, 1);
+    await missing(path.join(f.recoveryDir, recoveryId, 'item'));
+  }
+});
+
+test('concurrent restores serialize and stale reviews cannot replace recovery metadata', async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.root, 'value'), 'original');
+  const { recoveryId } = await f.execute({ action: 'trash', path: 'value' });
+  const first = await f.plan({ action: 'restore', recoveryId });
+  const second = await f.plan({ action: 'restore', recoveryId });
+  const results = await Promise.allSettled([executeFileAction(first, { confirmed: true }), executeFileAction(second, { confirmed: true })]);
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(results.filter(item => item.status === 'rejected').length, 1);
+  assert.equal(await readFile(path.join(f.root, 'value'), 'utf8'), 'original');
+  assert.equal((await listFileRecovery(f.root, { recoveryDir: f.recoveryDir }))[0].status, 'restored');
+
+  const again = await f.execute({ action: 'trash', path: 'value' });
+  const stale = await f.plan({ action: 'restore', recoveryId: again.recoveryId });
+  const filename = path.join(f.recoveryDir, again.recoveryId, 'manifest.json');
+  const changed = JSON.parse(await readFile(filename, 'utf8'));
+  changed.original = 'another-location';
+  await writeFile(filename, JSON.stringify(changed));
+  await assert.rejects(executeFileAction(stale, { confirmed: true }), /changed after review/);
+  await missing(path.join(f.root, 'value'));
+  await missing(path.join(f.root, 'another-location'));
+  assert.equal(await readFile(path.join(f.recoveryDir, again.recoveryId, 'item'), 'utf8'), 'original');
+});
+
+test('an interrupted move with changed bytes is never reconciled as the reviewed original', async t => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.root, 'value'), 'original');
+  await interruptedProcess(f, { action: 'trash', path: 'value' }, 'Exclusive recovery destination created.');
+  await writeFile(path.join(f.root, 'value'), 'edited after crash');
+  const [history] = await listFileRecovery(f.root, { recoveryDir: f.recoveryDir });
+  assert.equal(history.available, false);
+  assert.equal(history.status, 'needs-review');
+  await assert.rejects(f.plan({ action: 'restore', recoveryId: history.id }), /hard links/);
+  assert.equal(await readFile(path.join(f.root, 'value'), 'utf8'), 'edited after crash');
+  assert.equal(await readFile(path.join(f.recoveryDir, history.id, 'item'), 'utf8'), 'edited after crash');
+});
+
+test('recovery locks reject concurrent access and release only their own lock', async t => {
+  const f = await fixture(t);
+  await privateRecoveryDirectory(f.recoveryDir);
+  const release = await lockRecovery(f.recoveryDir);
+  await assert.rejects(lockRecovery(f.recoveryDir), error => error.code === 'RECOVERY_BUSY');
+  await release();
+  const next = await lockRecovery(f.recoveryDir);
+  await next();
+});
+
+test('new recovery directories are private and permissive existing folders are left untouched', async t => {
+  const f = await fixture(t);
+  await privateRecoveryDirectory(f.recoveryDir);
+  if (process.platform !== 'win32') assert.equal((await lstat(f.recoveryDir)).mode & 0o077, 0);
+  else {
+    const script = `$acl=Get-Acl -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(f.recoveryDir).toString('base64')}'))); [bool]$acl.AreAccessRulesProtected`;
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+    let output = ''; child.stdout.on('data', data => { output += data; });
+    assert.equal(await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }), 0);
+    assert.equal(output.trim(), 'True');
+  }
+  const permissive = path.join(f.base, 'permissive');
+  await mkdir(permissive, { mode: 0o755 });
+  if (process.platform !== 'win32') await chmod(permissive, 0o755);
+  const before = (await lstat(permissive)).mode;
+  await assert.rejects(privateRecoveryDirectory(permissive), /private|inherit|recovery storage|recovery directory/i);
+  assert.equal((await lstat(permissive)).mode, before);
+});
+
+
+test('simultaneous restarted processes reclaim one dead lease without overlapping transactions', async t => {
+  const f = await fixture(t);
+  await privateRecoveryDirectory(f.recoveryDir);
+  const moduleUrl = new URL('../src/recovery-safety.js', import.meta.url).href;
+  async function child(script) {
+    const proc = spawn(process.execPath, ['--input-type=module', '-e', script, f.recoveryDir], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stderr = ''; proc.stderr.on('data', data => { stderr += data; });
+    const code = await new Promise((resolve, reject) => { proc.on('error', reject); proc.on('exit', resolve); });
+    return { code, stderr };
+  }
+  const abandoned = await child(`import {lockRecovery} from ${JSON.stringify(moduleUrl)}; await lockRecovery(process.argv[1]); process.exit(77);`);
+  assert.equal(abandoned.code, 77, abandoned.stderr);
+  const worker = `import {lockRecovery} from ${JSON.stringify(moduleUrl)};
+    import {open,unlink} from 'node:fs/promises'; import path from 'node:path';
+    let release; const until=Date.now()+5000;
+    while(!release){try{release=await lockRecovery(process.argv[1]);}catch(e){if(e.code!=='RECOVERY_BUSY'||Date.now()>until)throw e;await new Promise(r=>setTimeout(r,10));}}
+    const marker=path.join(process.argv[1],'.active-test-only');
+    const handle=await open(marker,'wx');
+    await new Promise(r=>setTimeout(r,40)); await handle.close(); await unlink(marker); await release();`;
+  const results = await Promise.all(Array.from({ length: 6 }, () => child(worker)));
+  for (const result of results) assert.equal(result.code, 0, result.stderr);
+  await missing(path.join(f.recoveryDir, '.lock'));
+  await missing(path.join(f.recoveryDir, '.active-test-only'));
+});
+
+test('a newly created empty lease is busy and is never deleted by a contender', async t => {
+  const f = await fixture(t);
+  await privateRecoveryDirectory(f.recoveryDir);
+  await writeFile(path.join(f.recoveryDir, '.lock'), '');
+  await assert.rejects(lockRecovery(f.recoveryDir), error => error.code === 'RECOVERY_BUSY');
+  assert.equal(await readFile(path.join(f.recoveryDir, '.lock'), 'utf8'), '');
 });

@@ -1,0 +1,38 @@
+name: Validate release artifact
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+  artifact:
+    name: Build verified archive and checksums
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify version and assemble artifact
+        env:
+          JARVIS_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: node scripts/verify-package.js --output .artifacts/release
+      - name: Keep validated package, SHA-256 checksums and manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jarvis-workbench-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}-${{ github.run_id }}
+          path: .artifacts/release/*
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90

@@ -1,7 +1,8 @@
 param(
   [ValidateSet('status','set')][string]$Mode = 'status',
   [double]$Volume = -1,
-  [ValidateSet(-1,0,1)][int]$Mute = -1
+  [ValidateSet(-1,0,1)][int]$Mute = -1,
+  [string]$DeviceIdBase64 = ''
 )
 $ErrorActionPreference = 'Stop'
 # Documented Core Audio only; no private policy interfaces for switching defaults.
@@ -67,9 +68,12 @@ interface JarvisEndpointVolume {
   [PreserveSig] int GetVolumeRange(out float min,out float max,out float increment);
 }
 public class JarvisAudioDevice { public string id,name,kind; public bool isDefault; }
+public class JarvisAudioChanged : Exception {}
+public class JarvisAudioBefore { public double volume; public bool muted; public string deviceId; }
 public class JarvisAudioState {
   public bool available; public double? volume; public bool? muted; public bool canSelectDevice=false;
-  public string warning; public List<JarvisAudioDevice> devices=new List<JarvisAudioDevice>();
+  public string warning,changedDeviceId; public bool mutationAttempted,observed; public JarvisAudioBefore before;
+  public List<JarvisAudioDevice> devices=new List<JarvisAudioDevice>();
 }
 public static class JarvisAudio {
   [DllImport("ole32.dll")] static extern int PropVariantClear(ref JarvisPropVariant value);
@@ -85,7 +89,7 @@ public static class JarvisAudio {
       finally { PropVariantClear(ref value); }
     } finally { Release(store); }
   }
-  public static JarvisAudioState Run(bool change,double requestedVolume,int requestedMute) {
+  public static JarvisAudioState Run(bool change,double requestedVolume,int requestedMute,string expectedDeviceId) {
     if(change && ((requestedVolume!=-1 && (Double.IsNaN(requestedVolume) || Double.IsInfinity(requestedVolume) || requestedVolume<0 || requestedVolume>100)) || requestedMute < -1 || requestedMute>1)) throw new ArgumentException();
     JarvisIMMDeviceEnumerator enumerator=null;
     var result=new JarvisAudioState();
@@ -98,19 +102,29 @@ public static class JarvisAudio {
           if(enumerator.GetDefaultAudioEndpoint(flow,1,out defaultDevice)>=0) {
             Check(defaultDevice.GetId(out defaultId));
             if(flow==0) {
+              if(change && !String.IsNullOrEmpty(expectedDeviceId) && defaultId!=expectedDeviceId) throw new JarvisAudioChanged();
               object endpoint=null;
               try {
                 Guid iid=typeof(JarvisEndpointVolume).GUID;
                 Check(defaultDevice.Activate(ref iid,23,IntPtr.Zero,out endpoint));
                 var volume=(JarvisEndpointVolume)endpoint;
                 Guid context=new Guid("5B2AEF4E-1CA7-49CF-81B9-829186A6CB01");
-                if(change) {
-                  if(requestedVolume>=0) Check(volume.SetMasterVolumeLevelScalar((float)(requestedVolume/100.0),ref context));
-                  if(requestedMute>=0) Check(volume.SetMute(requestedMute==1,ref context));
-                }
                 float level; bool muted;
                 Check(volume.GetMasterVolumeLevelScalar(out level)); Check(volume.GetMute(out muted));
-                result.volume=Math.Round(level*100,1); result.muted=muted; result.available=true;
+                if(change) {
+                  result.before=new JarvisAudioBefore {volume=Math.Round(level*100,1),muted=muted,deviceId=defaultId};
+                  result.changedDeviceId=defaultId;
+                  result.mutationAttempted=true;
+                  try {
+                    if(requestedVolume>=0) Check(volume.SetMasterVolumeLevelScalar((float)(requestedVolume/100.0),ref context));
+                    if(requestedMute>=0) Check(volume.SetMute(requestedMute==1,ref context));
+                  } catch {
+                    result.warning="Windows could not apply every requested sound setting. Review the observed values; no automatic rollback was attempted.";
+                  }
+                  // Read the same endpoint after both setters, including partial-failure cases.
+                  Check(volume.GetMasterVolumeLevelScalar(out level)); Check(volume.GetMute(out muted));
+                }
+                result.volume=Math.Round(level*100,1); result.muted=muted; result.available=true; result.observed=true;
               } finally { Release(endpoint); }
             }
           }
@@ -132,12 +146,21 @@ public static class JarvisAudio {
       }
       if(!result.available) result.warning="No default output device is available. Choose an output in Windows sound settings.";
       return result;
+    } catch {
+      if(change && result.mutationAttempted) {
+        result.warning="Sound settings may already have changed. Windows could not finish reading the device. Refresh before trying again; no rollback was attempted.";
+        return result;
+      }
+      throw;
     } finally { Release(enumerator); }
   }
 }
 '@
 try {
-  [JarvisAudio]::Run(($Mode -eq 'set'),$Volume,$Mute) | ConvertTo-Json -Compress -Depth 5
+  [JarvisAudio]::Run(($Mode -eq 'set'),$Volume,$Mute,$([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($DeviceIdBase64)))) | ConvertTo-Json -Compress -Depth 5
 } catch {
-  @{error='AUDIO_FAILED';message='Windows could not access this sound device. Check the audio device and Windows Audio service, then refresh.'} | ConvertTo-Json -Compress
+  $cause = $_.Exception
+  while ($cause.InnerException) { $cause = $cause.InnerException }
+  if ($cause -is [JarvisAudioChanged]) { @{error='AUDIO_CHANGED'} | ConvertTo-Json -Compress }
+  else { @{error='AUDIO_FAILED'} | ConvertTo-Json -Compress }
 }

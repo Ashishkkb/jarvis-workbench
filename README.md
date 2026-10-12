@@ -2,7 +2,7 @@
 
 A local terminal and browser dashboard for finding text, understanding Git, managing files and storage, and controlling Windows networking, sound, security and power. Start with the task you want to finish; Jarvis supplies the controls and explains the command-line concepts behind them.
 
-**Version 0.2.0 / Node.js 22 or 24 Â· Zero npm dependencies Â· Apache-2.0 Â· No API key Â· No telemetry**
+**Version 0.3.0 / Node.js 22 or 24 / Zero npm dependencies / Apache-2.0 / No API key / No telemetry**
 
 Created by **Ashish / [Ashishkkb](https://github.com/Ashishkkb)**. This is an independent, open-source project. Voice integration is separate and is not included.
 
@@ -37,6 +37,14 @@ The planned npm package is `@ashishkkb/jarvis-workbench`. **It has not been publ
 **Browser:** run `jarvis --web`, or press **B** in the terminal dashboard. Jarvis starts a local server and opens your browser. Keep the terminal running; closing the Jarvis session stops its server. Use `--no-open` to print the URL or `--port 4177` to choose a port.
 
 The browser server binds only to `127.0.0.1`. Its launch URL contains a random session token, and every API request requires that token. No external service or account is involved. Git operations and project scripts still use your existing credentials and may contact their configured services.
+
+## Task recovery and release status
+
+A terminal dashboard and the browser it opens share one operation slot. Browser changes carry unique request identities: a lost response can be retried without applying the change twice. Reloading reconnects to a retained job in the same server session. Request identities are in memory, never a cross-restart transaction guarantee. Jarvis retains up to 50 jobs and 1,024 request identities per session; responses expire after 30 minutes, while expired identities remain blocked until restart. If a result is no longer available, check Activity and the affected tool before repeating a change.
+
+Native settings changes report their verified result, or an explicit partial/uncertain outcome with the previous state and restoration guidance where available. Cancellation cannot undo a change already accepted by Windows. Automatic DNS reports a request rather than claiming that effective addresses prove the configuration mode. Audio applies to the reviewed default device and refuses a changed device selection.
+
+Version 0.3 adds crash-recovery tests, consumer-install verification and a six-environment CI release gate. Real Windows status reads are checked from the installed archive. **Hardware-changing Windows paths still need qualification on disposable machines across devices and policy configurations.** See [CHANGELOG.md](CHANGELOG.md) for this release's changes and limits.
 
 ## Terminal controls
 
@@ -91,7 +99,7 @@ Files supports new folders, copy, move, rename and **move to recovery**, with ex
 
 Move to recovery keeps the selection recoverable and **does not free disk space**. Use **H** in Files or the browser's file recovery list to restore its original location. This is separate from old temporary-file cleanup under Storage. File recovery offers restore; it has no permanent-delete action. Existing original paths are not overwritten. Keep recovery data and manifests together. Partly completed operations report their errors and remaining destination/recovery information.
 
-File-manager recovery normally lives under the activity data directory in `file-recovery/<workspaceHash>`. For a Windows workspace on another drive, it uses `<drive>\.jarvis-workbench-recovery\<userHash>\<workspaceHash>` so the move remains on the same volume. The store stays outside your project and is protected from file actions.
+File-manager recovery normally lives under the activity data directory in `file-recovery/<workspaceHash>`. For a Windows workspace on another drive, it uses `<drive>\.jarvis-workbench-recovery\<userHash>\<workspaceHash>` so the move remains on the same volume. The store stays outside your project and is protected from file actions. Newly created Windows recovery stores receive a private access-control list for the current user, SYSTEM and Administrators. An existing permissive store is refused for new moves; existing records can still be restored. Jarvis does not silently change permissions on existing folders.
 
 Windows supports folder moves, renames and recovery. On Linux/macOS these folder operations are unavailable where an atomic no-overwrite directory move cannot be guaranteed; use copy instead. Regular-file actions, folder creation and folder copying remain available. Cross-filesystem moves are rejected; copy first, verify the result, then review moving the original to recovery. Cancellation can leave a reported partial copy if safely removing only Jarvis-created items is impossible.
 
@@ -108,7 +116,7 @@ Cleanup follows a separate review:
 3. Confirmed files move to a private recovery folder with a persistent transaction manifest. **Quarantining files does not free space:** it moves them on the same volume and reports zero reclaimed bytes.
 4. In recovery history, **Restore** returns files to their original locations without overwriting existing destinations. **Permanently empty** requires a separate confirmation and deletes only the validated files in that transaction. Permanent deletion cannot be undone by Jarvis.
 
-The terminal currently reviews up to 500 candidates per action. It shows the complete path-and-size list in a scrollable view; press **Enter** to proceed to a separate confirmation, then **Y** to move the reviewed files. Use the browser to select individual candidates. Recovery history also lets you review all files in a transaction before restoring or permanently emptying it. The backend preserves successful moves when a job is cancelled or partially fails, and recovery can resume recorded operations after an interrupted session.
+The terminal currently reviews up to 500 candidates per action. It shows the complete path-and-size list in a scrollable view; press **Enter** to proceed to a separate confirmation, then **Y** to move the reviewed files. Use the browser to select individual candidates. Recovery history also lets you review all files in a transaction before restoring or permanently emptying it. The backend preserves successful moves when a job is cancelled or partially fails. Transaction locks prevent overlapping recovery operations, and recovery reconciles recorded operations after a process crash. Files and manifests are flushed before acknowledging changes. Node does not provide Windows directory fsync, so this is not a guarantee against sudden power loss. Empty/corrupt interrupted locks and uncertain PID reuse fail closed for manual review.
 
 Recovery storage defaults to:
 
@@ -190,7 +198,7 @@ Activity history stores local action names, outcomes, timestamps, and target pat
 | Windows | `%LOCALAPPDATA%\JarvisWorkbench` |
 | Linux/macOS | `$XDG_STATE_HOME/jarvis-workbench`, or `~/.local/state/jarvis-workbench` |
 
-`JARVIS_DATA_DIR` overrides the activity folder. The log rotates at approximately 2 MiB, keeping the current file plus `.1` and `.2`. Common credential patterns are redacted, but paths and error messages can still be sensitive. Review logs before sharing them. Demo mode uses sample data and does not write real cleanup transactions or activity history.
+`JARVIS_DATA_DIR` overrides the activity folder. Writes are serialized across Jarvis processes and flushed to disk; an interrupted final record does not hide the next successful event. Job IDs connect browser actions to their activity records. The log rotates at approximately 2 MiB, keeping the current file plus `.1` and `.2`. Common credential patterns are redacted, but paths and error messages can still be sensitive. Review logs before sharing them. Demo mode uses sample data and does not write real cleanup transactions or activity history.
 
 There is no telemetry, analytics service, or external account requirement. See [SECURITY.md](SECURITY.md) for the local server and filesystem trust boundaries.
 
@@ -201,10 +209,10 @@ Use Node.js **22 or 24**; Node 20 is not a supported release target. Run:
 ```sh
 npm test
 npm run check
-npm pack --dry-run
+npm run test:package
 ```
 
-Tests use temporary fixtures. CI is configured for Node 22 and 24 on Windows, Ubuntu, and macOS. A configured matrix is not a claim that a hosted run has already passed; verify those results before publishing a release. `npm pack` creates a local archive and does not publish it. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Tests use temporary fixtures. CI is configured for Node 22 and 24 on Windows, Ubuntu, and macOS. A configured matrix is not a claim that a hosted run has already passed; verify those results before publishing a release. `npm pack` creates a local archive and does not publish it. See [CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASING.md](RELEASING.md) for install verification, archive checksums, updates and rollback.
 
 The About view and persistent **$ Support** shortcut credit Ashish / Ashishkkb. `support.json` names account holder **Ashish** and includes `YOUR_ACCOUNT_NUMBER` and `YOUR_IFSC_CODE` placeholders. These are not usable payment instructions. Replace them with verified public donation details before accepting donations.
 

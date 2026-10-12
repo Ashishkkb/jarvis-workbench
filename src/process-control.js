@@ -30,7 +30,7 @@ async function windowsProcess(pid, mode, expected, signal) {
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper,
     '-TargetPid', String(pid), '-CallerPid', String(process.pid), '-Mode', mode];
   if (expected) args.push('-ExpectedStart', expected.startedAt, '-ExpectedOwner', expected.owner, '-ExpectedName', expected.name);
-  const result = await run(powershell, args, { signal, timeout: 20_000, maxOutput: 64 * 1024 });
+  const result = await run(powershell, args, { cwd: path.win32.dirname(powershell), signal, timeout: 20_000, maxOutput: 64 * 1024 });
   let data;
   try { data = JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim()); }
   catch { throw failure('Windows could not verify this process. No process was stopped.', 'PROCESS_METADATA'); }

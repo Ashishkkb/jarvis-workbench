@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { randomUUID } from 'node:crypto';
 
 // A deliberately small DOM fixture: it models text conversion, dialog focus
 // restoration, and the browser's remaining Enter action without a browser dependency.
@@ -61,6 +62,9 @@ class Element {
 
 async function browserFixture(respond = () => { throw new Error("Unexpected request"); }) {
   const requests = [];
+  const headers = [];
+  const store = new Map();
+  const sessionStorage = { getItem: key => store.get(key) || null, setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key) };
   const nodes = new Map();
   const document = {
     activeElement: null,
@@ -75,11 +79,11 @@ async function browserFixture(respond = () => { throw new Error("Unexpected requ
   const source = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   const boot = '\nvoid init().catch(error => renderError(error));';
   assert.ok(source.endsWith(`${boot}\n`) || source.endsWith(boot), 'The browser startup must remain an explicit final call.');
-  const context = vm.createContext({ document, Node: Element, URLSearchParams, URL, AbortController, console, window: { scrollTo() {} },
+  const context = vm.createContext({ crypto: { randomUUID }, sessionStorage, document, Node: Element, URLSearchParams, URL, AbortController, console, window: { scrollTo() {} },
     setTimeout: () => 1, clearTimeout: () => {},
     fetch: async (url, options) => {
       const request = { url, method: options.method, body: options.body ? JSON.parse(options.body) : undefined };
-      requests.push(request);
+      requests.push(request); headers.push(options.headers);
       const response = await respond(request);
       return { ok: response.status === undefined || response.status < 400, status: response.status || 200, json: async () => response.body };
     },
@@ -90,13 +94,13 @@ async function browserFixture(respond = () => { throw new Error("Unexpected requ
     navigate = async screen => { state.screen = screen; };
     token = 'test-token';
     modal.addEventListener('close', onModalClose);
-    globalThis.testClient = { el, setPage, openPalette, screen: () => state.screen,
+    globalThis.testClient = { api, launchJob, recoverJobs, savedJob, el, setPage, openPalette, screen: () => state.screen,
       state, navigateActual, renderProcesses, reviewProcessStop, pollJob, jobWarnings, renderJobDock, fillJobModal,
       renderNetwork, renderAudio, renderSecurity, renderSettings, reviewWifiPassword, reviewDns,
       reviewSecurityScan, customSecurityScan, openAbout, openModal, fileActions, editFileAction, reviewFileAction, fileRecovery, renderFiles };
 
   `, context);
-  return { document, requests, client: context.testClient, modal: document.querySelector('#modal'), page: document.querySelector('#page') };
+  return { document, requests, headers, sessionStorage, client: context.testClient, modal: document.querySelector('#modal'), page: document.querySelector('#page') };
 }
 
 test('browser rendering omits absent nodes without displaying null or false', async () => {
@@ -351,4 +355,120 @@ test('opening another view before Overview finishes still initializes workspace 
   assert.equal(client.state.root, 'D:/project');
   assert.equal(document.querySelector('#workspace-name').textContent, 'project');
   assert.equal(document.querySelector('#footer-version').textContent, 'Jarvis Workbench v0.2.0');
+});
+
+test('a lost POST response retries with the same identity and payload', async () => {
+  let count = 0;
+  const { client, requests, headers } = await browserFixture(() => {
+    if (++count === 1) throw new TypeError('Connection lost after accepting the request');
+    return { body: { id: 'accepted-job' } };
+  });
+  assert.equal((await client.api('/api/actions', { method: 'POST', body: { action: 'git-push', confirmed: true } })).id, 'accepted-job');
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.ok(headers[0]['Idempotency-Key']);
+  assert.equal(headers[0]['Idempotency-Key'], headers[1]['Idempotency-Key']);
+});
+
+test('password requests are never retried or assigned a retained identity', async () => {
+  const { client, requests, headers } = await browserFixture(() => { throw new TypeError('Connection lost'); });
+  await assert.rejects(client.api('/api/network/password', { method: 'POST', body: { profile: 'Home', confirmed: true } }), /not responding/);
+  assert.equal(requests.length, 1);
+  assert.equal(headers[0]['Idempotency-Key'], undefined);
+});
+
+test('rapid task launch cannot send a second mutation while the first response is pending', async () => {
+  let accept;
+  const { client, requests } = await browserFixture(request => request.method === 'POST' ? new Promise(resolve => { accept = resolve; }) : { body: { id: 'one', status: 'running', logs: [] } });
+  const first = client.launchJob('/api/actions', { action: 'git-fetch', confirmed: true }, 'Fetch');
+  await assert.rejects(client.launchJob('/api/actions', { action: 'git-fetch', confirmed: true }, 'Fetch'), /Another task/);
+  assert.equal(requests.filter(item => item.method === 'POST').length, 1);
+  accept({ body: { id: 'one' } });
+  await first;
+  assert.equal(client.state.launching, false);
+  assert.equal(client.state.activeJob.id, 'one');
+});
+
+test('an interrupted launch discovers its accepted job without a fresh mutation', async () => {
+  let identity;
+  let fixture;
+  fixture = await browserFixture(request => {
+    if (request.method === 'POST') { identity = fixture.headers.at(-1)['Idempotency-Key']; throw new TypeError('Lost response'); }
+    if (request.url === '/api/jobs') return { body: [{ id: 'recovered', requestId: identity, status: 'running', action: 'git-push' }] };
+    return { body: { id: 'recovered', status: 'running', logs: [] } };
+  });
+  const job = await fixture.client.launchJob('/api/actions', { action: 'git-push', confirmed: true }, 'Upload');
+  assert.equal(job.id, 'recovered');
+  assert.equal(fixture.requests.filter(request => request.method === 'POST').length, 2);
+  assert.equal(new Set(fixture.headers.filter(item => item['Idempotency-Key']).map(item => item['Idempotency-Key'])).size, 1);
+  assert.equal(fixture.sessionStorage.getItem('jarvis-pending-job'), null);
+});
+
+test('reload recovers saved job metadata without storing bodies or executing it again', async () => {
+  const { client, requests, sessionStorage } = await browserFixture(request => request.url === '/api/jobs'
+    ? { body: [{ id: 'reload', requestId: 'pending-identity', action: 'file-move', status: 'running' }] }
+    : { body: { id: 'reload', status: 'running', logs: [] } });
+  sessionStorage.setItem('jarvis-pending-job', JSON.stringify({ requestId: 'pending-identity', title: 'Move selected file', kind: 'file-move' }));
+  await client.recoverJobs();
+  assert.equal(client.state.activeJob.id, 'reload');
+  assert.ok(requests.every(request => request.method === 'GET'));
+  assert.deepEqual(Object.keys(JSON.parse(sessionStorage.getItem('jarvis-active-job'))).sort(), ['id', 'kind', 'title']);
+});
+
+test('polling is single-flight and completion refresh failure is never treated as a lost task', async () => {
+  let resolvePoll, done = 0;
+  const { client, requests, document } = await browserFixture(request => request.url === '/api/activity' ? { body: [] }
+    : new Promise(resolve => { resolvePoll = resolve; }));
+  const job = { id: 'complete', title: 'Copy', kind: 'file-copy', status: 'running', logs: [], startedAt: new Date().toISOString(), onDone: () => { done++; throw new Error('Refresh failed'); } };
+  client.state.activeJob = job;
+  const first = client.pollJob(job);
+  await client.pollJob(job);
+  assert.equal(requests.length, 1);
+  resolvePoll({ body: { status: 'completed', result: { message: 'Copied.' }, logs: [] } });
+  await first;
+  await client.pollJob(job);
+  assert.equal(done, 1);
+  assert.equal(job.connectionError, '');
+  assert.equal(client.state.activeJob, null);
+  assert.match(document.querySelector('#toast').textContent, /finished, but its view could not refresh/);
+});
+
+test('an evicted task becomes unknown and releases the UI without claiming success', async () => {
+  const { client, document, sessionStorage } = await browserFixture(() => ({ status: 404, body: { error: 'Job missing' } }));
+  const job = { id: 'old', title: 'Old task', status: 'running', logs: [], startedAt: new Date().toISOString() };
+  client.state.activeJob = job;
+  sessionStorage.setItem('jarvis-active-job', JSON.stringify({ id: job.id }));
+  await client.pollJob(job);
+  assert.equal(job.status, 'unknown');
+  assert.equal(client.state.activeJob, null);
+  assert.equal(sessionStorage.getItem('jarvis-active-job'), null);
+  assert.match(document.querySelector('#job-dock').textContent, /Check Activity/);
+  assert.doesNotMatch(document.querySelector('#job-dock').textContent, /Completed on/);
+});
+
+test('partial native results show readback and restoration guidance', async () => {
+  const { client, document } = await browserFixture();
+  const job = { id: 'partial', title: 'DNS', kind: 'network', status: 'completed', logs: [], startedAt: new Date().toISOString(), result: { status: 'uncertain', message: 'Readback failed.', before: { dns: ['192.0.2.1'] }, after: null, restoreInstruction: 'Restore the saved DNS address using Network settings.', warnings: ['Verify connectivity.'] } };
+  client.fillJobModal(job);
+  const text = document.querySelector('#job-modal-content').textContent;
+  assert.match(text, /Readback failed/);
+  assert.match(text, /Restore the saved DNS/);
+  assert.match(text, /192\.0\.2\.1/);
+  assert.match(text, /Verify connectivity/);
+});
+
+
+test('reload restores a completed storage scan result, including partial cancellation', async () => {
+  const result = { root: 'fixture-root', cancelled: true, truncated: true, totalBytes: 123, cleanupCandidates: [], largestFiles: [], topFolders: [] };
+  const { client } = await browserFixture(request => request.url === '/api/jobs'
+    ? { body: [{ id: 'scan-reload', action: 'storage-scan', status: 'running' }] }
+    : request.url === '/api/activity' ? { body: [] }
+      : { body: { id: 'scan-reload', status: 'cancelled', result, logs: [] } });
+  const job = await client.recoverJobs();
+  for (let attempt = 0; attempt < 20 && job.polling; attempt++) await Promise.resolve();
+  assert.equal(job.kind, 'scan');
+  assert.equal(client.state.storage.scan.root, 'fixture-root');
+  assert.equal(client.state.storage.scan.totalBytes, 123);
+  assert.equal(client.state.storage.scan.cancelled, true);
+  assert.equal(client.state.storage.path, 'fixture-root');
 });

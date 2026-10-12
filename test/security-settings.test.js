@@ -15,7 +15,7 @@ function securityFixture(options = {}) {
   const execute = async (command, args, operation) => {
     calls.push({ command, args, operation });
     if (args.at(-1) === 'status') return { code: 0, stdout: JSON.stringify(data) };
-    if (args.at(-1) === 'locate') return { code: 0, stdout: JSON.stringify({ path: SCANNER }) };
+    if (args.at(-1) === 'locate') return { code: 0, stdout: JSON.stringify({ path: SCANNER, sha256: 'a'.repeat(64) }) };
     assert.equal(command, SCANNER);
     return options.scan ? options.scan(command, args, operation) : { code: 0, stdout: 'Scan finished.' };
   };
@@ -200,4 +200,76 @@ test('unknown Defender protection flags remain unknown and cannot authorize scan
   assert.equal(value.canScan, false);
   assert.match(value.scanUnavailableReason, /incomplete protection status/);
   await assert.rejects(fixture.service.planSecurityScan({ type: 'quick' }), /incomplete protection status/);
+});
+
+
+test('a Defender scanner replaced at the same path invalidates its reviewed plan', async () => {
+  let digest = 'a'.repeat(64), scans = 0;
+  const service = createSecurityService({ platform: 'win32', execute: async (_command, args) => {
+    if (args.at(-1) === 'status') return { stdout: JSON.stringify(status()) };
+    if (args.at(-1) === 'locate') return { stdout: JSON.stringify({ path: SCANNER, sha256: digest }) };
+    scans++; return { code: 0, stdout: '' };
+  } });
+  const plan = await service.planSecurityScan({ type: 'quick' });
+  digest = 'b'.repeat(64);
+  await assert.rejects(service.runSecurityScan(plan, { confirmed: true }), error => error.code === 'SCAN_SCANNER_CHANGED');
+  assert.equal(scans, 0);
+});
+
+test('Defender requires a verified scanner digest and preserves unknown exit outcomes', async () => {
+  const invalid = createSecurityService({ platform: 'win32', execute: async (_command, args) => ({ stdout: JSON.stringify(args.at(-1) === 'status' ? status() : { path: SCANNER }) }) });
+  await assert.rejects(invalid.planSecurityScan({ type: 'quick' }), /trusted Microsoft Defender/);
+  const fixture = securityFixture({ scan: async () => ({ code: 42, stdout: 'Unexpected result' }) });
+  const value = await fixture.service.runSecurityScan(await fixture.service.planSecurityScan({ type: 'quick' }), { confirmed: true });
+  assert.equal(value.status, 'attention-required');
+  assert.equal(value.exitCode, 42);
+  assert.equal(value.scanMayContinue, true);
+  assert.match(value.warnings.join(' '), /outcome is unknown/);
+});
+
+test('power-plan interruption preserves observed outcome and original plan without automatic rollback', async () => {
+  for (const applied of [true, false]) {
+    let active = FIRST, writes = 0;
+    const controller = new AbortController();
+    const service = createSettingsService({ platform: 'win32', execute: async (_command, args, options) => {
+      if (args[0] === '/list') return { stdout: [FIRST, SECOND].map(id => `${id} (Fixture plan)`).join('\n') };
+      if (args[0] === '/getactivescheme') {
+        if (controller.signal.aborted) assert.equal(options.signal, undefined);
+        return { stdout: active };
+      }
+      assert.equal(args[0], '/setactive');
+      writes++;
+      if (applied) active = SECOND;
+      controller.abort();
+      throw Object.assign(new Error('Interrupted'), { code: 'ABORT_ERR' });
+    } });
+    const plan = await service.planSettingChange({ action: 'power-plan', id: SECOND });
+    const value = await service.applySettingChange(plan, { confirmed: true, signal: controller.signal });
+    assert.equal(value.status, applied ? 'changed' : 'uncertain');
+    assert.equal(value.verified, applied);
+    assert.equal(value.before.planId, FIRST);
+    assert.equal(value.after.planId, applied ? SECOND : FIRST);
+    assert.equal(value.cancellationRequested, true);
+    assert.match(value.restoreInstruction, /did not roll back/);
+    assert.ok(value.warnings.length);
+    assert.equal(writes, 1);
+  }
+});
+
+test('standalone settings service refuses concurrent power-plan mutations', async () => {
+  let release, entered, active = FIRST;
+  const gate = new Promise(resolve => { release = resolve; });
+  const start = new Promise(resolve => { entered = resolve; });
+  const service = createSettingsService({ platform: 'win32', execute: async (_command, args) => {
+    if (args[0] === '/list') return { stdout: [FIRST, SECOND].map(id => `${id} (Fixture plan)`).join('\n') };
+    if (args[0] === '/getactivescheme') return { stdout: active };
+    entered(); await gate; active = SECOND; return { stdout: '' };
+  } });
+  const first = await service.planSettingChange({ action: 'power-plan', id: SECOND });
+  const second = await service.planSettingChange({ action: 'power-plan', id: SECOND });
+  const pending = service.applySettingChange(first, { confirmed: true });
+  await start;
+  await assert.rejects(service.applySettingChange(second, { confirmed: true }), error => error.code === 'SETTINGS_BUSY');
+  release(); await pending;
+  await assert.rejects(service.applySettingChange(second, { confirmed: true }), error => error.code === 'SETTING_CHANGED');
 });

@@ -16,6 +16,7 @@ const emit = (callback, message) => { try { callback?.(`${message}\n`, 'stdout')
 
 async function inspectTarget(input) {
   if (typeof input !== 'string' || !path.isAbsolute(input) || input.length > 4096 || /[\x00-\x1f]/.test(input) || /^[/\\]{2}/.test(input)) throw failure('Choose an absolute local file or folder to scan.', 'INVALID_SCAN_PATH');
+  if (process.platform === 'win32' && input.slice(path.parse(input).root.length).includes(':')) throw failure('Windows alternate data streams cannot be used as scan targets.', 'INVALID_SCAN_PATH');
   const resolved = path.resolve(input);
   const canonical = await realpath(resolved);
   let cursor = resolved;
@@ -41,8 +42,8 @@ export function createSecurityService({ platform = process.platform, execute = r
   let active = false;
   const powershell = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   async function nativeStatus(mode, signal) {
-    const result = await execute(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper, '-Mode', mode], { signal, timeout: 20_000, maxOutput: 1024 * 1024 });
-    try { return JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim()); }
+    const result = await execute(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper, '-Mode', mode], { cwd: path.win32.dirname(powershell), signal, timeout: 20_000, maxOutput: 1024 * 1024 });
+    try { const value = JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim()); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); return value; }
     catch { throw failure('Windows returned an unreadable Defender response. Open Windows Security to check protection.'); }
   }
   async function getSecurityStatus({ signal } = {}) {
@@ -80,12 +81,12 @@ export function createSecurityService({ platform = process.platform, execute = r
     if (!status.available || !status.canScan) throw failure(status.reason || status.scanUnavailableReason);
     const target = input.type === 'custom' ? await inspectPath(input.path) : null;
     const located = await nativeStatus('locate', signal);
-    if (typeof located.path !== 'string' || !path.win32.isAbsolute(located.path) || path.win32.basename(located.path).toLowerCase() !== 'mpcmdrun.exe') throw failure('A trusted Microsoft Defender scanner is not available.');
+    if (typeof located.path !== 'string' || !path.win32.isAbsolute(located.path) || path.win32.basename(located.path).toLowerCase() !== 'mpcmdrun.exe' || typeof located.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(located.sha256)) throw failure('A trusted Microsoft Defender scanner is not available.');
     const expires = now() + 120_000;
     const plan = Object.freeze({ id: randomUUID(), type: input.type, path: target?.path || null, title: `${input.type[0].toUpperCase()}${input.type.slice(1)} Microsoft Defender scan`,
       warning: 'Microsoft Defender may quarantine or remove threats according to your Windows protection settings. Save your work first. Stopping monitoring does not stop the Defender scan; use Windows Security to review it. Full scans can take hours.',
       cancellation: 'monitoring-only', expiresAt: new Date(expires).toISOString() });
-    issued.set(plan, { expires, target, executable: located.path });
+    issued.set(plan, { expires, target, executable: located.path, sha256: located.sha256 });
     return plan;
   }
   async function runSecurityScan(plan, { confirmed = false, signal, onOutput } = {}) {
@@ -109,7 +110,7 @@ export function createSecurityService({ platform = process.platform, execute = r
       if (!status.available || !status.canScan) throw failure(status.reason || status.scanUnavailableReason);
       if (record.target && !sameTarget(record.target, await inspectPath(record.target.path))) throw failure('The custom scan target changed since review. Review it again.', 'SCAN_TARGET_CHANGED');
       const located = await nativeStatus('locate', monitor.signal);
-      if (located.path !== record.executable) throw failure('The Defender scanner changed since review. Review it again.', 'SCAN_SCANNER_CHANGED');
+      if (located.path !== record.executable || located.sha256 !== record.sha256) throw failure('The Defender scanner changed since review. Review it again.', 'SCAN_SCANNER_CHANGED');
       checkAbort(monitor.signal);
       const args = ['-Scan', '-ScanType', String({ quick: 1, full: 2, custom: 3 }[plan.type])];
       if (record.target) args.push('-File', record.target.path);
@@ -125,13 +126,13 @@ export function createSecurityService({ platform = process.platform, execute = r
         } catch { /* The scan command remains authoritative; status refresh is best effort. */ }
         finally { polling = false; }
       }, Math.max(100, pollIntervalMs));
-      const result = await execute(record.executable, args, { timeout: 0, signal: monitor.signal, killTree: false, allowFailure: true, maxOutput: 8 * 1024 * 1024,
+      const result = await execute(record.executable, args, { cwd: path.win32.dirname(record.executable), timeout: 0, signal: monitor.signal, killTree: false, allowFailure: true, maxOutput: 8 * 1024 * 1024,
         onOutput: chunk => { try { onOutput?.(chunk, 'stdout'); } catch { /* Non-fatal output handler. */ } } });
       clearTimeout(timer); clearInterval(poller);
       const security = await getSecurityStatus({ signal: monitor.signal }).catch(() => ({ available: false, reason: 'Status refresh was interrupted after the scan command finished.', detections: [], warnings: [] }));
       if (result.code === 0) return { status: 'completed', exitCode: 0, scanMayContinue: false, message: 'Defender finished the scan. It found no threats or successfully remediated detections. Review Protection history for details.', security };
       if (result.code === 2) return { status: 'attention-required', exitCode: 2, scanMayContinue: false, message: 'Defender reported a detection requiring attention or a scan error. Review Windows Security and the scan output.', warnings: ['Defender requires review; this result does not establish that the computer is clean.'], security };
-      throw failure(`Microsoft Defender returned exit code ${result.code}. Review Windows Security and the scan output.`, 'SCAN_FAILED');
+      return { status: 'attention-required', exitCode: result.code, scanMayContinue: true, message: `Defender returned an unexpected exit code (${result.code}). Its final scan state could not be established. Review Windows Security.`, warnings: ['The scan outcome is unknown; this result does not establish that the scan completed or that the computer is clean.'], security };
     } catch (error) {
       if (started && (monitor.signal.aborted || ['OUTPUT_LIMIT', 'OUTPUT_HANDLER', 'TIMEOUT'].includes(error.code))) {
         const message = monitorReason === 'timeout' ? 'Jarvis reached its monitoring time limit. Defender may still be scanning. Review Windows Security.' : 'Jarvis stopped monitoring. Defender may still be scanning. Review Windows Security; no global scan cancellation was sent.';

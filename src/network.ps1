@@ -148,7 +148,7 @@ try {
       }
       $configuration[0] | Set-DnsClientServerAddress -ServerAddresses $addresses -ErrorAction Stop
     }
-    @{status='applied';message='IPv4 DNS settings were applied.'} | ConvertTo-Json -Compress
+    @{status='requested';message='Windows accepted the IPv4 DNS request. Read back the adapter to verify the result.'} | ConvertTo-Json -Compress
   } else {
     $profile = if ($ProfileBase64) { [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ProfileBase64)) } else { '' }
     $result = [JarvisWifi]::Action($Mode,$AdapterId,$profile)

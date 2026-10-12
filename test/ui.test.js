@@ -4,6 +4,7 @@ import { Dashboard, safeRemote } from '../src/app.js';
 import { demoState } from '../src/demo.js';
 import { friendlyError, width } from '../src/format.js';
 import { NAV, renderDashboard } from '../src/ui.js';
+import { OperationCoordinator } from '../src/operations.js';
 
 function dashboard({ demo = false } = {}) {
   const frames = [];
@@ -366,4 +367,83 @@ test('long confirmation text remains scrollable on a small terminal', async () =
   frame = renderDashboard(app.state, 56, 17, { color: false });
   assert.match(frame, /Line 11 to review/);
   assert.match(frame, /Continue\?/);
+});
+
+
+test('terminal task output stays bounded even when a program never emits a newline', async () => {
+  for (const failure of [false, true]) {
+    const { app } = dashboard();
+    await app.runTask('Noisy program', async ({ onOutput }) => {
+      onOutput('x'.repeat(200 * 1024));
+      onOutput('y'.repeat(200 * 1024));
+      onOutput('z'.repeat(200 * 1024));
+      if (failure) throw new Error('Fixture failure after output');
+      return { code: 0 };
+    });
+    assert.equal(app.state.operationLog.at(-1), '[Output truncated at 256 KB.]');
+    assert.ok(Buffer.byteLength(app.state.operationLog.join('\n')) <= 256 * 1024 + 100);
+    assert.ok(!app.state.operationLog.join('').includes('z'));
+    assert.equal(app.state.busy, null);
+    assert.equal(app.controller, null);
+    assert.equal(app.state.message.tone, failure ? 'bad' : 'good');
+  }
+});
+
+test('the terminal retains only recent output rows and strips injected control sequences', async () => {
+  const { app } = dashboard();
+  await app.runTask('Many lines', async ({ onOutput }) => {
+    for (let index = 0; index < 300; index++) onOutput(`\x1b[31mline-${index}\x1b[0m\n`);
+    return { code: 0 };
+  });
+  assert.equal(app.state.operationLog.length, 120);
+  assert.equal(app.state.operationLog[0], 'line-180');
+  assert.equal(app.state.operationLog.at(-1), 'line-299');
+  assert.ok(app.state.operationLog.every(line => !line.includes('\x1b')));
+});
+
+test('an operation owned by the browser blocks terminal execution without cancelling the other view', async () => {
+  const { app } = dashboard();
+  const shared = new OperationCoordinator();
+  app.operations = shared;
+  const browserController = new AbortController();
+  const releaseBrowser = shared.acquire('browser file move', browserController);
+  let invoked = false;
+  const rejected = await app.runTask('terminal cleanup', async () => { invoked = true; });
+  assert.equal(rejected, undefined);
+  assert.equal(invoked, false);
+  assert.match(app.state.message.text, /browser file move/);
+  assert.equal(app.state.message.tone, 'warn');
+  assert.equal(app.controller, null);
+  assert.equal(Boolean(app.state.busy), false);
+  await app.onKey(undefined, { name: 'escape' });
+  assert.equal(browserController.signal.aborted, false);
+  releaseBrowser();
+  const result = await app.runTask('terminal next operation', async () => ({ status: 'completed', message: 'fixture complete' }));
+  assert.equal(result.status, 'completed');
+  assert.equal(shared.active, null);
+});
+
+test('terminal cancellation preserves an uncertain native result and releases the shared operation slot', async () => {
+  const { app } = dashboard();
+  const shared = new OperationCoordinator(); app.operations = shared;
+  let ready;
+  const entered = new Promise(resolve => { ready = resolve; });
+  const result = { status: 'uncertain', cancelled: true, before: { value: 1 }, after: { value: 2 },
+    message: 'The command stopped while applying. Refresh before retrying.' };
+  const pending = app.runTask('Changing fixture setting', ({ signal, onOutput }) => new Promise(resolve => {
+    onOutput('native command started\n');
+    signal.addEventListener('abort', () => resolve(result), { once: true }); ready();
+  }));
+  await entered;
+  assert.throws(() => shared.acquire('browser action', new AbortController()), error => error.code === 'OPERATION_BUSY');
+  await app.onKey(undefined, { name: 'escape' });
+  assert.equal(await pending, result);
+  assert.equal(app.state.message.tone, 'warn');
+  assert.match(app.state.message.text, /Refresh before retrying/);
+  assert.deepEqual(app.state.operationLog, ['native command started']);
+  assert.equal(shared.active, null);
+  assert.equal(app.controller, null);
+  assert.equal(app.state.busy, null);
+  const release = shared.acquire('browser action after cancellation', new AbortController());
+  release();
 });

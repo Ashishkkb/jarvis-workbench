@@ -33,7 +33,8 @@ test('network review is read-only, frozen, explicit, one-use, and exact-adapter 
   await assert.rejects(api.applyNetworkChange(plan), error => error.code === 'CONFIRMATION_REQUIRED');
   await assert.rejects(api.applyNetworkChange({ ...plan }, { confirmed: true }), error => error.code === 'INVALID_NETWORK_PLAN');
   const result = await api.applyNetworkChange(plan, { confirmed: true });
-  assert.equal(result.status, 'requested');
+  assert.equal(result.status, 'applied');
+  assert.equal(result.verified, true);
   assert.equal(mutations(calls).length, 1);
   const request = mutations(calls)[0];
   assert.match(request.command, /\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/i);
@@ -114,7 +115,7 @@ test('network and audio return clear unavailable states without invoking Windows
   assert.equal((await createAudioController({ platform: 'win32', execute }).getAudioStatus()).available, false);
 });
 
-test('audio validates consent and 0–100 volume, invokes fixed helper arguments, and returns observed state', async () => {
+test('audio validates consent and 0-100 volume, invokes fixed helper arguments, and returns observed state', async () => {
   const calls = [];
   const api = createAudioController({ platform: 'win32', execute: async (command, args) => {
     calls.push({ command, args });
@@ -123,7 +124,7 @@ test('audio validates consent and 0–100 volume, invokes fixed helper arguments
   } });
   await assert.rejects(api.setAudioSettings({ volume: 20 }), error => error.code === 'CONFIRMATION_REQUIRED');
   for (const settings of [{ volume: -1 }, { volume: 101 }, { volume: '50' }, { volume: NaN },
-    { muted: 'true' }, {}, { volume: 40, deviceId: 'unreviewed' }]) {
+    { muted: 'true' }, {}, { volume: 40, deviceId: 'invalid\ndevice' }]) {
     await assert.rejects(api.setAudioSettings({ ...settings, confirmed: true }), error => error.code === 'AUDIO_INVALID');
   }
   assert.equal(calls.length, 0);
@@ -147,4 +148,150 @@ test('cancelled network and audio requests do not invoke operating-system tools'
   await assert.rejects(network.getNetworkStatus({ signal: controller.signal }), error => error.code === 'ABORT_ERR');
   await assert.rejects(audio.setAudioSettings({ volume: 10, confirmed: true }, { signal: controller.signal }), error => error.code === 'ABORT_ERR');
   assert.equal(calls, 0);
+});
+
+
+test('network changes are verified from observed state, never from an accepted helper response', async () => {
+  const { api } = networkFixture();
+  const plan = await api.planNetworkChange({ action: 'dns', adapterId, dns: ['1.1.1.1'] });
+  const result = await api.applyNetworkChange(plan, { confirmed: true });
+  assert.equal(result.status, 'requested');
+  assert.equal(result.verified, false);
+  assert.deepEqual(result.before.dns, ['192.0.2.1']);
+  assert.deepEqual(result.after.dns, ['192.0.2.1']);
+  assert.match(result.restoreInstruction, /automatic\/manual mode was not established/);
+  assert.ok(result.warnings.length);
+  const auto = await api.applyNetworkChange(await api.planNetworkChange({ action: 'dns', adapterId, dns: null }), { confirmed: true });
+  assert.equal(auto.status, 'requested');
+  assert.equal(auto.verified, false);
+  assert.match(auto.message, /automatic DNS mode could not be independently verified/);
+});
+
+test('network cancellation after dispatch reads back the OS and preserves a verified change and warning', async () => {
+  let observed = status(), mutations = 0;
+  const controller = new AbortController();
+  const api = createNetworkController({ platform: 'win32', execute: async (_command, args, options) => {
+    const action = args[args.indexOf('-Mode') + 1];
+    if (action === 'status') {
+      if (controller.signal.aborted) assert.equal(options.signal, undefined);
+      return { stdout: JSON.stringify(observed) };
+    }
+    mutations++;
+    observed.adapters[0].dns = ['1.1.1.1'];
+    controller.abort();
+    throw Object.assign(new Error('Interrupted after write'), { code: 'ABORT_ERR' });
+  } });
+  const plan = await api.planNetworkChange({ action: 'dns', adapterId, dns: ['1.1.1.1'] });
+  const result = await api.applyNetworkChange(plan, { confirmed: true, signal: controller.signal });
+  assert.equal(result.status, 'applied');
+  assert.equal(result.verified, true);
+  assert.equal(result.cancellationRequested, true);
+  assert.equal(mutations, 1);
+  assert.deepEqual(result.before.dns, ['192.0.2.1']);
+  assert.deepEqual(result.after.dns, ['1.1.1.1']);
+  assert.match(result.warnings.join(' '), /interrupted/);
+});
+
+test('network failures with unavailable readback leave an explicit unknown outcome', async () => {
+  let dispatched = false;
+  const api = createNetworkController({ platform: 'win32', execute: async (_command, args) => {
+    if (args[args.indexOf('-Mode') + 1] === 'status' && !dispatched) return { stdout: JSON.stringify(status()) };
+    dispatched = true;
+    throw new Error('Host disconnected');
+  } });
+  const plan = await api.planNetworkChange({ action: 'disconnect', adapterId });
+  const result = await api.applyNetworkChange(plan, { confirmed: true });
+  assert.equal(result.status, 'uncertain');
+  assert.equal(result.verified, false);
+  assert.equal(result.after, null);
+  assert.match(result.message, /may already have changed/);
+});
+
+test('password helper JSON errors and malformed responses cannot disclose secret content', async () => {
+  for (const response of [{ error: 'SECRET-IN-CODE', message: 'SECRET-IN-MESSAGE' }, null, []]) {
+    const api = createNetworkController({ platform: 'win32', execute: async (_command, args) => ({ stdout: JSON.stringify(args[args.indexOf('-Mode') + 1] === 'status' ? status() : response) }) });
+    await assert.rejects(api.getWifiPassword({ adapterId, profile, confirmed: true }), error => {
+      assert.doesNotMatch(error.message + JSON.stringify(error), /SECRET/);
+      return true;
+    });
+  }
+});
+
+const audioState = (overrides = {}) => ({ available: true, volume: 20, muted: false, devices: [{ id: 'fixture-output', name: 'Fixture speakers', kind: 'output', isDefault: true }], ...overrides });
+
+test('audio returns the observed partial change, original values, and restore guidance', async () => {
+  let calls = 0;
+  const api = createAudioController({ platform: 'win32', execute: async () => {
+    calls++;
+    return { stdout: JSON.stringify(audioState({ volume: 30, warning: 'Second setter failed', changedDeviceId: 'fixture-output',
+      before: { volume: 20, muted: false, deviceId: 'fixture-output' }, mutationAttempted: true })) };
+  } });
+  const result = await api.setAudioSettings({ volume: 30, muted: true, deviceId: 'fixture-output', confirmed: true });
+  assert.equal(result.status, 'partial');
+  assert.equal(result.verified, false);
+  assert.equal(result.before.volume, 20);
+  assert.equal(result.after.volume, 30);
+  assert.equal(result.after.muted, false);
+  assert.equal(result.defaultDeviceId, 'fixture-output');
+  assert.match(result.restoreInstruction, /20%/);
+  assert.ok(result.warnings.length);
+  assert.equal(calls, 1, 'Never retries or rolls back a partially applied change');
+});
+
+test('audio binds a change to the reviewed device and refuses a changed default before writing', async () => {
+  const calls = [];
+  const api = createAudioController({ platform: 'win32', execute: async (_command, args) => { calls.push(args); return { stdout: JSON.stringify({ error: 'AUDIO_CHANGED' }) }; } });
+  await assert.rejects(api.setAudioSettings({ volume: 20, deviceId: 'reviewed-output', confirmed: true }), error => error.code === 'AUDIO_CHANGED');
+  assert.equal(calls.length, 1);
+  assert.equal(Buffer.from(calls[0][calls[0].indexOf('-DeviceIdBase64') + 1], 'base64').toString(), 'reviewed-output');
+});
+
+test('audio cancellation after a write verifies readback without treating it as rollback', async () => {
+  const controller = new AbortController();
+  const api = createAudioController({ platform: 'win32', execute: async (_command, args, options) => {
+    if (args[args.indexOf('-Mode') + 1] === 'set') { controller.abort(); throw Object.assign(new Error('Interrupted'), { code: 'ABORT_ERR' }); }
+    assert.equal(options.signal, undefined);
+    return { stdout: JSON.stringify(audioState({ volume: 30 })) };
+  } });
+  const result = await api.setAudioSettings({ volume: 30, deviceId: 'fixture-output', confirmed: true }, { signal: controller.signal });
+  assert.equal(result.status, 'changed');
+  assert.equal(result.verified, true);
+  assert.equal(result.before, null);
+  assert.equal(result.after.volume, 30);
+  assert.equal(result.cancellationRequested, true);
+  assert.match(result.warnings.join(' '), /interrupted/);
+});
+
+test('audio must not claim success on another output device or a mismatched volume', async () => {
+  const api = createAudioController({ platform: 'win32', execute: async () => ({ stdout: JSON.stringify(audioState()) }) });
+  const wrongDevice = await api.setAudioSettings({ volume: 20, deviceId: 'different-output', confirmed: true });
+  assert.equal(wrongDevice.status, 'uncertain');
+  assert.equal(wrongDevice.verified, false);
+  const wrongVolume = await api.setAudioSettings({ volume: 25, confirmed: true });
+  assert.equal(wrongVolume.status, 'uncertain');
+  assert.equal(wrongVolume.verified, false);
+});
+
+test('standalone controllers refuse overlapping mutations, preserving the second plan for a new attempt', async () => {
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const start = new Promise(resolve => { entered = resolve; });
+  const api = createNetworkController({ platform: 'win32', execute: async (_command, args) => {
+    if (args[args.indexOf('-Mode') + 1] === 'status') return { stdout: JSON.stringify(status()) };
+    entered(); await gate; return { stdout: '{}' };
+  } });
+  const first = await api.planNetworkChange({ action: 'connect', adapterId, profile });
+  const second = await api.planNetworkChange({ action: 'connect', adapterId, profile });
+  const pending = api.applyNetworkChange(first, { confirmed: true });
+  await start;
+  await assert.rejects(api.applyNetworkChange(second, { confirmed: true }), error => error.code === 'NETWORK_BUSY');
+  release(); await pending;
+  assert.equal((await api.applyNetworkChange(second, { confirmed: true })).verified, true);
+
+  let releaseAudio;
+  const audioGate = new Promise(resolve => { releaseAudio = resolve; });
+  const audio = createAudioController({ platform: 'win32', execute: async () => { await audioGate; return { stdout: JSON.stringify(audioState()) }; } });
+  const setting = audio.setAudioSettings({ volume: 20, confirmed: true });
+  await assert.rejects(audio.setAudioSettings({ volume: 25, confirmed: true }), error => error.code === 'AUDIO_BUSY');
+  releaseAudio(); await setting;
 });

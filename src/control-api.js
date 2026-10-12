@@ -36,7 +36,7 @@ export function createControlApi({ workspace, demo, createJob, audit, network, a
   async function immediate(action, execute) {
     const job = createJob(action, execute);
     await job.promise;
-    if (job.status !== 'completed') throw fail(job.error || 'The change could not be completed.');
+    if (job.status !== 'completed' && !(job.status === 'cancelled' && job.result)) throw fail(job.error || 'The change could not be completed.');
     return { status: 200, value: job.result };
   }
   async function post(route, body, signal) {
@@ -50,7 +50,7 @@ export function createControlApi({ workspace, demo, createJob, audit, network, a
       return { status: 200, sensitive: true, value: { password: result.password } };
     }
     if (route === '/api/audio') {
-      fields(body, ['volume', 'muted', 'confirmed']); confirm(body);
+      fields(body, ['volume', 'muted', 'deviceId', 'confirmed']); confirm(body);
       return immediate('audio-change', options => services.audio.setAudioSettings(body, options));
     }
     if (route === '/api/settings/open') {

@@ -269,3 +269,42 @@ test('OS temporary-directory aliases work without permitting links below that pr
   assert.equal((await listCleanupHistory({ quarantineDir: lexicalQuarantine }))[0].id, planned.id);
   assert.equal((await restoreCleanup(planned.id, { quarantineDir } )).restoredBytes, 5);
 });
+
+
+test('cleanup and permanent purge require boolean confirmation and a cleanup review is single-use', async t => {
+  const { quarantineDir, file, plan } = await fixture(t);
+  const old = await file('old', 'keep until confirmed');
+  const planned = await plan([old]);
+  for (const confirmed of ['true', 1, {}, []]) {
+    await assert.rejects(executeCleanup(planned, { confirmed, quarantineDir }), /explicitly confirm/);
+  }
+  assert.equal(await readFile(old, 'utf8'), 'keep until confirmed');
+  await executeCleanup(planned, { confirmed: true, quarantineDir });
+  await assert.rejects(executeCleanup(planned, { confirmed: true, quarantineDir }), /fresh cleanup plan/);
+  for (const confirmed of ['true', 1, {}, []]) {
+    await assert.rejects(purgeCleanup(planned.id, { confirmed, quarantineDir }), /Explicitly confirm/);
+  }
+  const restored = await restoreCleanup(planned.id, { quarantineDir });
+  assert.equal(restored.restoredBytes, 20);
+  assert.equal(await readFile(old, 'utf8'), 'keep until confirmed');
+});
+
+
+test('custom application state and file recovery remain protected inside temporary storage', async t => {
+  const { root, file, plan } = await fixture(t);
+  const state = path.join(root, 'application-state');
+  const held = await file('application-state/file-recovery/held', 'recovery bytes');
+  const ordinary = await file('ordinary', 'temporary');
+  const previous = process.env.JARVIS_DATA_DIR;
+  process.env.JARVIS_DATA_DIR = state;
+  try {
+    const result = await scanStorage(root, { tempRoot: root });
+    assert.ok(!result.cleanupCandidates.some(item => item.path === held));
+    assert.ok(result.cleanupCandidates.some(item => item.path === ordinary));
+    await assert.rejects(plan([held]), /application and recovery files/);
+    assert.equal(await readFile(held, 'utf8'), 'recovery bytes');
+  } finally {
+    if (previous === undefined) delete process.env.JARVIS_DATA_DIR;
+    else process.env.JARVIS_DATA_DIR = previous;
+  }
+});

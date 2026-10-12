@@ -36,7 +36,7 @@ Git and system commands use executable-plus-argument invocation without evaluati
 
 There is no telemetry. Activity logs remain local, rotate around 2 MiB per file, and retain two older files. They include target paths and status/error messages. Common credential patterns are redacted on a best-effort basis; redaction is not a guarantee that arbitrary secrets are removed. Inspect logs before sharing them.
 
-Recovery manifests contain original file paths and metadata. The program requests private directory/file modes where supported; Windows access control follows the user's filesystem permissions. Protect both activity and recovery folders as personal data.
+Recovery manifests contain original file paths and metadata. The program requests private directory/file modes where supported; New Windows recovery directories receive an explicit private ACL for the current user, SYSTEM and Administrators. Existing permissive recovery stores are refused for new moves without modifying their ACLs. Activity-directory access still follows the user's filesystem permissions. Protect both activity and recovery folders as personal data.
 
 ## Process control
 
@@ -51,7 +51,7 @@ Network connection/DNS and power-plan changes use exact, expiring, process-issue
 
 Saved Wi-Fi passwords require explicit disclosure confirmation for a selected existing profile. They are returned directly to an ephemeral view and bypass activity and operation logs. Terminal display is hidden after 45 seconds or Esc; browser handling also clears its disclosure view. This is display hygiene, not a guarantee against memory inspection, browser extensions, screen recording or other same-user software. Do not reveal secrets while sharing your screen.
 
-Defender scan plans identify quick, full or canonical custom-file/folder scope, expire after two minutes, and require the exact issued object plus confirmation. The installed scanner's Microsoft signature is checked when selecting the executable. Custom targets are checked for links and identity changes before launch. Defender's own protection policy can quarantine or remove threats. Scan output/history may include sensitive file paths. Command status is reported without claiming that successful execution establishes a malware-free system.
+Defender scan plans identify quick, full or canonical custom-file/folder scope, expire after two minutes, and require the exact issued object plus confirmation. The installed scanner's Microsoft signature, reparse-free ancestor path and SHA-256 identity are checked; a changed executable requires a fresh review. Custom targets are checked for links and identity changes before launch. Defender's own protection policy can quarantine or remove threats. Scan output/history may include sensitive file paths. Command status is reported without claiming that successful execution establishes a malware-free system.
 
 Cancellation stops the Jarvis scanner client/monitor, not the Defender service. A cancelled or timed-out monitor explicitly reports that scanning may continue; no global Defender cancellation is sent. Permission failures, incomplete status and unknown protection flags remain visible. Tests mock Defender execution and settings mutations; development checks do not launch real antivirus scans or change the developer machine's settings.
 
@@ -60,3 +60,11 @@ Cancellation stops the Jarvis scanner client/monitor, not the Defender service. 
 Reviewed operations stay inside their workspace, reject links and protected metadata/runtime paths, and refuse existing destinations. File review is bounded and execution rechecks the source snapshot. Recovery is per-workspace, retains original paths and does not reclaim space. Copies track newly created destination items; cancellation or errors clean up only those items and report anything that cannot be removed safely. A partial result must not be presented as successful completion.
 
 Windows uses native no-overwrite directory moves. Platforms without a supported atomic no-overwrite directory operation refuse folder moves, renames and folder recovery rather than exposing an overwrite race. Regular-file operations and bounded folder copies have their documented filesystem limitations. An actively malicious process with the same user privileges can still race path checks; neither file recovery nor quarantine is a backup or security boundary against that actor.
+
+## Request and recovery durability
+
+Browser mutations use session-scoped idempotency keys bound to the route and exact request body. Duplicate keys return the same result; mismatches and expired retained keys are refused. The cache is bounded to 1,024 identities and does not persist across server restarts. Password disclosures never enter this cache. Job history is limited to 50 entries. Terminal and browser operations share a coordinator within one application instance; it is not a global lock across all Jarvis installations.
+
+Activity appends use interprocess locks, bounded record fields, rotation and fsync. Linked log files are refused. A truncated last line is isolated before the next append. Recovery transactions serialize moves/restores and reconcile interrupted publication. Tests cover actual process crashes, not physical power failure; Windows directory flush is unavailable through Node. Empty/corrupt locks and ambiguous PID ownership fail closed. Keep recovery directories intact and use their recorded state to investigate instead of deleting a lock blindly.
+
+Settings helpers run from a trusted Windows directory, independent of the selected project. A cancellation or readback failure after dispatch is reported as a potentially applied change, with previous/observed state where available. Tests exercise mutation outcomes through mocks and verify installed native status reads; broad hardware mutation qualification remains a release limitation.

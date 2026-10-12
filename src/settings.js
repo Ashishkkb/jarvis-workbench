@@ -35,12 +35,13 @@ function parsePlans(text, activeId) {
 /** Factory permits deterministic tests; UI callers use the singleton exports below. */
 export function createSettingsService({ platform = process.platform, execute = run, now = Date.now } = {}) {
   const issued = new WeakMap();
+  let applying = false;
   const ensureWindows = () => { if (platform !== 'win32') throw failure(unsupported().reason); };
   async function getSystemSettings({ signal } = {}) {
     if (platform !== 'win32') return unsupported();
     checkAbort(signal);
     try {
-      const options = { signal, timeout: 10_000, maxOutput: 64 * 1024 };
+      const options = { cwd: nativeTool(''), signal, timeout: 10_000, maxOutput: 64 * 1024 };
       const [listed, active] = await Promise.all([execute(nativeTool('powercfg.exe'), ['/list'], options), execute(nativeTool('powercfg.exe'), ['/getactivescheme'], options)]);
       const activePowerPlanId = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(active.stdout)?.[0].toLowerCase();
       const powerPlans = parsePlans(listed.stdout, activePowerPlanId);
@@ -83,7 +84,7 @@ export function createSettingsService({ platform = process.platform, execute = r
     const page = pages.find(item => item.id === id);
     if (!page) throw failure('Choose an available Windows Settings page.', 'INVALID_SETTING');
     // The script contains only a compile-time allowlisted URI, never user input.
-    await execute(nativeTool('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; Start-Process -FilePath '${page.uri}'`], { signal, timeout: 10_000, maxOutput: 16 * 1024 });
+    await execute(nativeTool('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop'; Start-Process -FilePath '${page.uri}'`], { cwd: nativeTool(''), signal, timeout: 10_000, maxOutput: 16 * 1024 });
     return { status: 'opened', pageId: page.id, message: `Opened ${page.title} in Windows Settings.` };
   }
   async function applySettingChange(plan, { confirmed = false, signal, onOutput } = {}) {
@@ -92,18 +93,33 @@ export function createSettingsService({ platform = process.platform, execute = r
     if (!record) throw failure('Review this setting again before applying it.', 'INVALID_SETTING_PLAN');
     if (confirmed !== true) throw failure('Explicit confirmation is required.', 'CONFIRMATION_REQUIRED');
     if (now() >= record.expires) { issued.delete(plan); throw failure('This setting review expired. Review it again.', 'SETTING_PLAN_EXPIRED'); }
-    issued.delete(plan);
-    if (plan.kind === 'open-settings') {
-      const result = await openSettingsPage(plan.pageId, { confirmed: true, signal }); emit(onOutput, result.message); return result;
-    }
-    const current = await getSystemSettings({ signal });
-    if (!current.powerPlans.some(item => item.id === plan.planId) || current.activePowerPlanId !== plan.previousPlanId) throw failure('The power plans changed since review. Refresh and review again.', 'SETTING_CHANGED');
-    checkAbort(signal);
-    await execute(nativeTool('powercfg.exe'), ['/setactive', plan.planId], { signal, timeout: 10_000, maxOutput: 64 * 1024 });
-    const after = await getSystemSettings({ signal });
-    if (after.activePowerPlanId !== plan.planId) return { status: 'requested', planId: plan.planId, message: 'Windows accepted the power-plan command, but the active plan could not be verified. Refresh to check.', warnings: ['The resulting power plan could not be verified.'] };
-    const result = { status: 'changed', planId: plan.planId, previousPlanId: plan.previousPlanId, message: `Active power plan: ${plan.name}.` };
-    emit(onOutput, result.message); return result;
+    if (applying) throw failure('Another system setting change is in progress. Wait for it to finish.', 'SETTINGS_BUSY');
+    applying = true;
+    try {
+      issued.delete(plan);
+      if (plan.kind === 'open-settings') {
+        const result = await openSettingsPage(plan.pageId, { confirmed: true, signal }); emit(onOutput, result.message); return result;
+      }
+      const current = await getSystemSettings({ signal });
+      if (!current.powerPlans.some(item => item.id === plan.planId) || current.activePowerPlanId !== plan.previousPlanId) throw failure('The power plans changed since review. Refresh and review again.', 'SETTING_CHANGED');
+      checkAbort(signal);
+      let commandFailed = false;
+      try { await execute(nativeTool('powercfg.exe'), ['/setactive', plan.planId], { cwd: nativeTool(''), signal, timeout: 10_000, maxOutput: 64 * 1024 }); }
+      catch { commandFailed = true; }
+      // Once dispatched, cancellation cannot prove that Windows did not apply the change.
+      const observed = await getSystemSettings().catch(() => null);
+      const verified = observed?.activePowerPlanId === plan.planId;
+      const restoreInstruction = `Previous power plan: ${plan.previousPlanId}. Select it and review a new change to restore it. Jarvis did not roll back.`;
+      const message = verified ? `Active power plan verified: ${plan.name}.`
+        : commandFailed ? 'The power-plan request was interrupted or Windows refused it. The active plan may already have changed. Refresh before trying again.'
+          : 'Windows accepted the power-plan command, but the active plan could not be verified. Refresh to check.';
+      const warnings = verified && !commandFailed ? [] : [message, restoreInstruction];
+      if (verified && commandFailed) warnings[0] = 'The command response was interrupted, but the requested power plan was subsequently observed.';
+      const result = { status: verified ? 'changed' : commandFailed ? 'uncertain' : 'requested', verified, planId: plan.planId,
+        previousPlanId: plan.previousPlanId, before: { planId: plan.previousPlanId }, after: observed?.activePowerPlanId ? { planId: observed.activePowerPlanId } : null,
+        cancellationRequested: signal?.aborted === true, restoreInstruction, message, warnings };
+      emit(onOutput, result.message); return result;
+    } finally { applying = false; }
   }
   return { getSystemSettings, planSettingChange, applySettingChange, openSettingsPage };
 }

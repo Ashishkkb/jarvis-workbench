@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { startServer } from '../src/server.js';
+import { OperationCoordinator } from '../src/operations.js';
 
 async function session(t, options = {}) {
   const events = [];
@@ -544,4 +545,173 @@ test('demo native controls never inspect or modify the host computer', async t =
   assert.deepEqual((await request('/api/files/recovery')).json, []);
   assert.equal((await request('/api/network/password', { method: 'POST', body: { confirmed: true } })).status, 400);
   assert.equal((await request('/api/audio', { method: 'POST', body: { volume: 10, confirmed: true } })).status, 400);
+});
+
+
+test('concurrent and completed idempotent sound requests execute once and recover their job by request identity', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), key = randomUUID();
+  let release, entered, changes = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const began = new Promise(resolve => { entered = resolve; });
+  const { request } = await session(t, { root, demo: false, audio: {
+    setAudioSettings: async body => { changes++; entered(); await gate; return { available: true, volume: body.volume, status: 'changed', verified: true }; },
+  } });
+  const submit = (body = { volume: 20, confirmed: true }, route = '/api/audio') => request(route, { method: 'POST', body, headers: { 'Idempotency-Key': key } });
+  try {
+    const first = submit(), duplicate = submit();
+    await began;
+    const history = await request('/api/jobs');
+    assert.equal(history.status, 200);
+    assert.equal(history.json.length, 1);
+    assert.equal(history.json[0].requestId, key);
+    const running = await request(`/api/jobs/${history.json[0].id}`);
+    assert.equal(running.json.requestId, key);
+    assert.equal(running.json.status, 'running');
+    assert.equal(running.json.controller, undefined);
+    assert.equal(running.json.promise, undefined);
+    assert.equal((await submit({ volume: 30, confirmed: true })).status, 409);
+    assert.equal((await submit({ id: 'sound', confirmed: true }, '/api/settings/open')).status, 409);
+    release();
+    const results = await Promise.all([first, duplicate]);
+    assert.deepEqual(results.map(item => item.status), [200, 200]);
+    assert.deepEqual(results[0].json, results[1].json);
+    assert.deepEqual((await submit()).json, results[0].json);
+    assert.equal(changes, 1);
+    assert.equal((await request('/api/jobs')).json.length, 1);
+  } finally { release(); }
+});
+
+test('idempotent async jobs retain one reviewed operation and rejected requests cannot be replayed', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), key = randomUUID();
+  let changes = 0;
+  const plan = Object.freeze({ id: randomUUID(), expiresAt: new Date(Date.now() + 60000).toISOString() });
+  const { request } = await session(t, { root, demo: false, network: {
+    planNetworkChange: async () => plan,
+    applyNetworkChange: async value => { assert.equal(value, plan); changes++; return { status: 'applied', verified: true }; },
+  }, audio: { setAudioSettings: async () => { changes++; throw new Error('Fixture device failed after an uncertain request.'); } } });
+  await request('/api/network/plan', { method: 'POST', body: { action: 'disconnect' } });
+  const options = { method: 'POST', body: { planId: plan.id, confirmed: true }, headers: { 'Idempotency-Key': key } };
+  const one = await request('/api/network/execute', options), two = await request('/api/network/execute', options);
+  assert.equal(one.status, 202); assert.equal(two.status, 202);
+  assert.equal(one.json.id, two.json.id);
+  assert.equal((await finished(request, one.json.id)).result.verified, true);
+  assert.equal(changes, 1);
+  const errorOptions = { method: 'POST', body: { volume: 20, confirmed: true }, headers: { 'Idempotency-Key': randomUUID() } };
+  const failed = await request('/api/audio', errorOptions), repeated = await request('/api/audio', errorOptions);
+  assert.equal(failed.status, 400); assert.deepEqual(repeated.json, failed.json);
+  assert.equal(changes, 2, 'A failed mutation with unknown outcome must not be repeated automatically');
+  assert.equal((await request('/api/audio', { ...errorOptions, headers: { 'Idempotency-Key': 'short' } })).status, 400);
+  assert.equal(changes, 2);
+});
+
+test('password requests bypass retry caching and sanitize all error paths without jobs or logs', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), key = randomUUID();
+  const secret = 'FIXTURE-SECRET-MUST-NOT-APPEAR';
+  let calls = 0;
+  const { request, events } = await session(t, { root, demo: false, network: {
+    getWifiPassword: async () => {
+      calls++;
+      if (calls <= 2) return { password: `exact:${secret}:${calls}` };
+      throw Object.assign(new Error(secret), { stdout: secret, stderr: secret, code: secret });
+    },
+  } });
+  const options = { method: 'POST', body: { profile: 'fixture', adapterId: 'fixture', confirmed: true }, headers: { 'Idempotency-Key': key } };
+  const first = await request('/api/network/password', options), second = await request('/api/network/password', options);
+  assert.equal(first.status, 200); assert.equal(second.status, 200);
+  assert.equal(first.json.password, `exact:${secret}:1`);
+  assert.equal(second.json.password, `exact:${secret}:2`);
+  const failed = await request('/api/network/password', options);
+  assert.equal(failed.status, 400);
+  assert.doesNotMatch(failed.text, new RegExp(secret));
+  assert.match(failed.json.error, /Confirm one saved profile and check Windows permissions/);
+  assert.equal(failed.headers['cache-control'], 'no-store');
+  assert.equal(calls, 3);
+  assert.deepEqual((await request('/api/jobs')).json, []);
+  assert.ok(!JSON.stringify(events).includes(secret));
+  assert.ok(!(await request('/api/activity')).text.includes(secret));
+});
+
+test('shared operation coordinator blocks terminal and other dashboard conflicts without consuming reviews', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), operations = new OperationCoordinator();
+  const terminalController = new AbortController();
+  const releaseTerminal = operations.acquire('Terminal fixture operation', terminalController);
+  let changes = 0, release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const began = new Promise(resolve => { entered = resolve; });
+  const plan = Object.freeze({ id: randomUUID(), expiresAt: new Date(Date.now() + 60000).toISOString() });
+  const first = await session(t, { root, demo: false, operations, network: {
+    getNetworkStatus: async () => ({ available: true, adapters: [], profiles: [] }),
+    planNetworkChange: async () => plan,
+    applyNetworkChange: async () => { changes++; entered(); await gate; return { status: 'applied' }; },
+  } });
+  const second = await session(t, { root, demo: false, operations, audio: { setAudioSettings: async () => { changes++; return { volume: 20 }; } } });
+  try {
+    assert.equal((await first.request('/api/network')).status, 200, 'Read-only inspection remains available');
+    await first.request('/api/network/plan', { method: 'POST', body: { action: 'disconnect' } });
+    const options = { method: 'POST', body: { planId: plan.id, confirmed: true } };
+    assert.equal((await first.request('/api/network/execute', options)).status, 409);
+    assert.equal(changes, 0);
+    releaseTerminal();
+    const started = await first.request('/api/network/execute', options);
+    assert.equal(started.status, 202, 'Busy refusal must preserve the reviewed plan');
+    await began;
+    assert.equal((await second.request('/api/audio', { method: 'POST', body: { volume: 20, confirmed: true } })).status, 409);
+    await second.close();
+    assert.equal(terminalController.signal.aborted, false);
+    assert.equal(operations.active.label, 'network-change', 'Closing another dashboard must not cancel this one');
+    release();
+    assert.equal((await finished(first.request, started.json.id)).status, 'completed');
+    assert.equal(changes, 1);
+    assert.equal(operations.active, null);
+  } finally { releaseTerminal(); release(); }
+});
+
+test('closing a dashboard is idempotent, cancels owned jobs, and releases its operation slot once', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), operations = new OperationCoordinator();
+  let started, cancelled = 0;
+  const began = new Promise(resolve => { started = resolve; });
+  const app = await session(t, { root, demo: false, operations, storage: { scanStorage: async (_path, { signal }) => {
+    started();
+    await new Promise(resolve => { signal.addEventListener('abort', () => { cancelled++; resolve(); }, { once: true }); });
+    return { cancelled: true, totalFiles: 3, totalBytes: 12 };
+  } } });
+  const response = await app.request('/api/storage/scan', { method: 'POST', body: { path: root } });
+  assert.equal(response.status, 202);
+  await began;
+  const first = app.close(), second = app.close();
+  assert.equal(first, second);
+  await Promise.all([first, second]);
+  await app.close();
+  assert.equal(cancelled, 1);
+  assert.equal(operations.active, null);
+  assert.equal(app.server.listening, false);
+  assert.equal(app.events.filter(event => event.action === 'dashboard' && event.status === 'stopped').length, 1);
+  assert.ok(app.events.some(event => event.action === 'storage-scan' && event.status === 'cancelled'));
+});
+
+
+test('cancelling an immediate sound request preserves its partial result and recovery warning', { timeout: 10_000 }, async t => {
+  const root = await fixture(t), key = randomUUID();
+  let entered;
+  const began = new Promise(resolve => { entered = resolve; });
+  const partial = { available: true, status: 'partial', verified: false, volume: 30, muted: false,
+    before: { volume: 20, muted: false, deviceId: 'fixture' }, after: { volume: 30, muted: false, deviceId: 'fixture' },
+    cancellationRequested: true, message: 'Only volume changed before monitoring stopped.', warnings: ['No rollback was attempted. Review sound settings.'] };
+  const { request } = await session(t, { root, demo: false, audio: { setAudioSettings: async (_body, { signal }) => {
+    entered();
+    await new Promise(resolve => { if (signal.aborted) resolve(); else signal.addEventListener('abort', resolve, { once: true }); });
+    return partial;
+  } } });
+  const pending = request('/api/audio', { method: 'POST', body: { volume: 30, muted: true, deviceId: 'fixture', confirmed: true }, headers: { 'Idempotency-Key': key } });
+  await began;
+  const [job] = (await request('/api/jobs')).json;
+  assert.equal(job.requestId, key);
+  assert.equal((await request(`/api/jobs/${job.id}/cancel`, { method: 'POST', body: {} })).status, 200);
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.json, partial);
+  const result = await finished(request, job.id);
+  assert.equal(result.status, 'cancelled');
+  assert.deepEqual(result.result, partial);
+  assert.match(result.warnings.join(' '), /No rollback/);
 });

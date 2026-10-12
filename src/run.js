@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 export class ToolError extends Error {
   constructor(message, details = {}) {
@@ -24,7 +25,7 @@ export function run(command, args = [], options = {}) {
       failure = new ToolError(message, { code });
       if (killTree && child.pid) {
         if (process.platform === 'win32') {
-          const terminator = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' });
+          const terminator = spawn(path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' });
           terminator.once('error', () => child.kill());
           terminator.once('close', code => { if (code !== 0) child.kill(); });
         } else {

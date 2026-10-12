@@ -1,10 +1,12 @@
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, opendir, readFile, realpath, rename, statfs, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, opendir, realpath, rename, statfs, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { run } from './run.js';
+import { dataDirectory } from './activity.js';
+import { privateRecoveryDirectory, lockRecovery, syncDirectory } from './recovery-safety.js';
 
 const DAY = 86400000;
 const PLAN_LIFETIME = 15 * 60000;
@@ -64,15 +66,7 @@ async function inspectPath(target, { base, file = false, directory = false } = {
 
 async function ensurePrivateDirectory(target) {
   const absolute = await resolveTempAlias(target);
-  const parsed = path.parse(absolute);
-  let current = parsed.root;
-  for (const segment of absolute.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
-    current = path.join(current, segment);
-    try { await mkdir(current, { mode: 0o700 }); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
-    const info = await lstat(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('The recovery folder cannot contain symbolic links or junctions.');
-  }
+  await privateRecoveryDirectory(absolute);
   return (await inspectPath(absolute, { directory: true })).path;
 }
 
@@ -100,7 +94,7 @@ async function temporaryRoot(requested) {
 }
 
 async function protectedPaths(options = {}) {
-  const selected = [runtimeRoot, process.execPath, defaultQuarantineDir(), options.quarantineDir, ...(options.activePaths || [])].filter(Boolean);
+  const selected = [runtimeRoot, process.execPath, dataDirectory(), defaultQuarantineDir(), options.quarantineDir, ...(options.activePaths || [])].filter(Boolean);
   return Promise.all(selected.map(async value => { try { return await realpath(value); } catch { return path.resolve(value); } }));
 }
 
@@ -287,29 +281,8 @@ async function atomicManifest(folder, manifest) {
     const existing = await exists(target);
     if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error('Recovery manifest is not a regular file.');
     await rename(temporary, target);
+    await syncDirectory(folder);
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-}
-
-async function lockTransaction(folder) {
-  const lockPath = path.join(folder, '.lock');
-  let handle;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try { handle = await open(lockPath, 'wx', 0o600); break; }
-    catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      await inspectPath(lockPath, { base: folder, file: true });
-      let lock;
-      try { lock = JSON.parse(await readFile(lockPath, 'utf8')); } catch { throw new Error('A cleanup transaction is already in progress.'); }
-      if (!Number.isInteger(lock.pid) || lock.pid <= 0) throw new Error('A cleanup transaction is already in progress.');
-      let alive = true;
-      try { process.kill(lock.pid, 0); } catch (checkError) { if (checkError.code === 'ESRCH') alive = false; }
-      if (alive || attempt) throw new Error('A cleanup transaction is already in progress.');
-      await unlink(lockPath);
-    }
-  }
-  await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
-  await handle.sync();
-  return async () => { await handle.close(); await unlink(lockPath).catch(() => {}); };
 }
 
 function validIdentity(value) {
@@ -335,7 +308,7 @@ async function loadTransaction(id, quarantineDir, { lock = true } = {}) {
   const folder = path.join(store, id);
   await inspectPath(folder, { base: store, directory: true });
   await inspectPath(path.join(folder, 'files'), { base: folder, directory: true });
-  const release = lock ? await lockTransaction(folder) : async () => {};
+  const release = lock ? await lockRecovery(folder) : async () => {};
   try {
     const manifestPath = path.join(folder, 'manifest.json');
     const { info } = await inspectPath(manifestPath, { base: folder, file: true });
@@ -360,15 +333,16 @@ function summary(manifest, additions = {}) {
 
 /** Quarantine is reversible and intentionally reports zero reclaimed bytes. */
 export async function executeCleanup(plan, { confirmed = false, signal, onProgress, quarantineDir } = {}) {
-  if (!confirmed) throw new Error('Review the cleanup plan and explicitly confirm before moving files.');
+  if (confirmed !== true) throw new Error('Review the cleanup plan and explicitly confirm before moving files.');
   if (!issuedPlans.has(plan)) throw new Error('Create a fresh cleanup plan before continuing.');
   if (Date.now() > Date.parse(plan.expiresAt)) throw new Error('This cleanup plan has expired. Scan and review the files again.');
   checkAbort(signal);
+  issuedPlans.delete(plan);
   const store = await ensurePrivateDirectory(quarantineDir || defaultQuarantineDir());
   const folder = path.join(store, plan.id);
   await mkdir(folder, { mode: 0o700 });
   await mkdir(path.join(folder, 'files'), { mode: 0o700 });
-  const release = await lockTransaction(folder);
+  const release = await lockRecovery(folder);
   const manifest = {
     version: 1, id: plan.id, mode: 'quarantine', createdAt: plan.createdAt, updatedAt: new Date().toISOString(), status: 'preparing', root: plan.root, tempRoot: plan.tempRoot,
     entries: plan.entries.map(entry => ({ ...entry, identity: { ...entry.identity }, quarantineName: `${entry.id}.bin`, state: 'pending' })),
@@ -500,7 +474,7 @@ export async function restoreCleanup(id, options = {}) {
 }
 
 export async function purgeCleanup(id, { confirmed = false, ...options } = {}) {
-  if (!confirmed) throw new Error('Explicitly confirm permanent deletion of these recovery files.');
+  if (confirmed !== true) throw new Error('Explicitly confirm permanent deletion of these recovery files.');
   return operateRecovery(id, options, true);
 }
 

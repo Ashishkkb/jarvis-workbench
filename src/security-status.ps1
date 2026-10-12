@@ -3,6 +3,17 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 function BoolValue($Value) { if ($Value -is [bool]) { return $Value }; return $null }
+function NoReparseAncestors([string]$Path) {
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ($parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+    return $true
+}
 function DateValue($Value) { if ($null -eq $Value) { return $null }; try { return $Value.ToUniversalTime().ToString('o') } catch { return $null } }
 try {
     if ($Mode -eq 'locate') {
@@ -16,10 +27,13 @@ try {
         foreach ($candidate in $candidates) {
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
                 $item = Get-Item -LiteralPath $candidate
-                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                if (-not (NoReparseAncestors $candidate)) { continue }
                 $signature = Get-AuthenticodeSignature -LiteralPath $candidate
                 if ($signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -match '(^|,\s*)O=Microsoft Corporation(,|$)') {
-                    @{ path = $item.FullName } | ConvertTo-Json -Compress
+                    $digest = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                    $after = Get-Item -LiteralPath $candidate -ErrorAction Stop
+                    if ($item.Length -ne $after.Length -or $item.LastWriteTimeUtc.Ticks -ne $after.LastWriteTimeUtc.Ticks) { continue }
+                    @{ path = $item.FullName; sha256 = $digest } | ConvertTo-Json -Compress
                     exit 0
                 }
             }

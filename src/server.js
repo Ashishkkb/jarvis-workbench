@@ -1,5 +1,6 @@
 import http from 'node:http';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { readFile, realpath, stat, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { getGitStatus, getGitDiff, fetchRemote, commitAll, pushCurrent, pullCurrent } from './git.js';
@@ -15,6 +16,7 @@ import { getAbout } from './about.js';
 import * as storageFunctions from './storage.js';
 import * as processFunctions from './process-control.js';
 import { createControlApi } from './control-api.js';
+import { OperationCoordinator } from './operations.js';
 
 const BODY_LIMIT = 64 * 1024;
 const LOG_LIMIT = 256 * 1024;
@@ -94,7 +96,7 @@ function readJson(req) {
 }
 
 /** Start a loopback-only browser dashboard. No project commands run at startup. */
-export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage, processControl, network, audio, security, settings, fileActions } = {}) {
+export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage, processControl, network, audio, security, settings, fileActions, operations = new OperationCoordinator() } = {}) {
   if (host !== '127.0.0.1') throw new Error('The dashboard binds only to 127.0.0.1.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Choose a valid local port.');
   const sample = demo ? demoState() : null;
@@ -103,6 +105,9 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
   const token = randomBytes(32).toString('hex');
   const expectedAuthorization = Buffer.from(`Bearer ${token}`);
   const jobs = new Map();
+  const requests = new Map();
+  const requestContext = new AsyncLocalStorage();
+  const readers = new Set();
   const plans = new Map();
   const processPlans = new Map();
   const processApi = { ...processFunctions, ...processControl };
@@ -147,9 +152,10 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
   function createJob(action, execute, { target, message } = {}) {
     if (activeJob) throw new HttpError(409, 'Another operation is running. Wait for it or cancel it first.');
     if (closing) throw new HttpError(503, 'The dashboard is closing.');
-    while (jobs.size >= 50) jobs.delete(jobs.keys().next().value);
-    const job = { id: randomUUID(), action, status: 'running', logs: [], logTruncated: false, result: null, error: null, warnings: [], activityWarning: null,
+    const job = { id: randomUUID(), requestId: requestContext.getStore() || null, action, status: 'running', logs: [], logTruncated: false, result: null, error: null, warnings: [], activityWarning: null,
       startedAt: new Date().toISOString(), finishedAt: null, controller: new AbortController(), pending: '', bytes: 0 };
+    const release = operations.acquire(action, job.controller);
+    while (jobs.size >= 50) jobs.delete(jobs.keys().next().value);
     jobs.set(job.id, job);
     activeJob = job;
     job.promise = (async () => {
@@ -161,7 +167,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
         if (Array.isArray(result?.warnings)) job.warnings.push(...result.warnings.map(item => safeError(new Error(String(item)))));
         if (Array.isArray(result?.errors) && result.errors.length) job.warnings.push(`${result.errors.length} file operation${result.errors.length === 1 ? '' : 's'} could not be completed. Review the per-file errors and recovery history.`);
         else if (result?.status === 'partial') job.warnings.push('This operation completed only partly. Review the result and recovery history before continuing.');
-        if (action === 'process-stop' && result?.status === 'requested') job.warnings.push(result.message || 'A stop was requested, but the process has not exited yet. Refresh the process list to check.');
+        if (['requested', 'uncertain', 'attention-required'].includes(result?.status)) job.warnings.push(result.message || 'The operation needs verification. Refresh the relevant view to check its outcome.');
         if (result?.truncated && !result?.cancelled) job.warnings.push('The scan reached its time or entry limit. These results cover only the scanned portion.');
         if (job.controller.signal.aborted || result?.cancelled) {
           job.result = result ?? null;
@@ -184,6 +190,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
         job.status = outcome;
         job.finishedAt = new Date().toISOString();
         if (activeJob === job) activeJob = null;
+        release();
       }
     })();
     return job;
@@ -365,11 +372,51 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     if (pathname === '/api/recipes') return RECIPES;
     if (pathname === '/api/activity') return demo ? demoEvents : activityLog?.list ? activityLog.list() : [];
     if (pathname === '/api/about') return getAbout();
+    if (pathname === '/api/jobs') return [...jobs.values()].reverse().map(job => ({ id: job.id, requestId: job.requestId, action: job.action, status: job.status, startedAt: job.startedAt, finishedAt: job.finishedAt }));
     if (pathname === '/api/storage/locations') return demo ? [{ id: 'demo', label: 'Demo storage', path: '/', kind: 'drive', totalBytes: 500 * 1024 ** 3, availableBytes: 300 * 1024 ** 3 }] : storageApi.listScanLocations();
     if (pathname === '/api/storage/history') return demo ? demoHistory : storageApi.listCleanupHistory();
     const match = /^\/api\/jobs\/([a-f0-9-]{36})$/.exec(pathname);
     if (match && jobs.has(match[1])) return exposeJob(jobs.get(match[1]));
     throw new HttpError(404, 'This API route was not found.');
+  }
+
+  async function postRoute(route, body, signal) {
+    if (controls.postRoutes.has(route)) {
+      if (route === '/api/network/password') {
+        try { return await controls.post(route, body, signal); }
+        catch { throw new HttpError(400, 'The saved password could not be revealed. Confirm one saved profile and check Windows permissions.'); }
+      }
+      return controls.post(route, body, signal);
+    }
+    if (route === '/api/actions') return { status: 202, value: { id: (await actionRequest(body)).id } };
+    if (route.startsWith('/api/processes/')) return processRequest(route, body, signal);
+    if (route.startsWith('/api/storage/')) return storageRequest(route, body);
+    const match = /^\/api\/jobs\/([a-f0-9-]{36})\/cancel$/.exec(route);
+    if (!match || !jobs.has(match[1])) throw new HttpError(404, 'This API route was not found.');
+    objectFields(body, []);
+    const job = jobs.get(match[1]);
+    if (job.status === 'running') job.controller.abort();
+    return { status: 200, value: { id: job.id, status: job.status } };
+  }
+  async function postOnce(req, route, body, signal) {
+    const key = req.headers['idempotency-key'];
+    // Password disclosure is always a fresh explicit request, never retained or retried.
+    if (key === undefined || route === '/api/network/password' || route.endsWith('/plan') || route.endsWith('/cancel')) return postRoute(route, body, signal);
+    if (typeof key !== 'string' || !/^[a-z0-9-]{16,80}$/i.test(key)) throw new HttpError(400, 'Invalid request identity.');
+    const fingerprint = createHash('sha256').update(route + '\n' + JSON.stringify(body)).digest('hex');
+    for (const entry of requests.values()) if (entry.finished && Date.now() - entry.finished > 30 * 60_000) { entry.expired = true; entry.promise = null; }
+    const prior = requests.get(key);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw new HttpError(409, 'This request identity was already used for a different action.');
+      if (prior.expired) throw new HttpError(409, 'This request has expired. Review activity before starting a new action; it will not be repeated.');
+      return prior.promise;
+    }
+    if (requests.size >= 1024) throw new HttpError(429, 'This session has reached its request history limit. Start a new Jarvis session before making more changes.');
+    const entry = { fingerprint, finished: null, promise: null };
+    // Do not evict a retained request: retries must never execute an old action twice.
+    requests.set(key, entry);
+    entry.promise = Promise.resolve().then(() => requestContext.run(key, () => postRoute(route, body, signal))).finally(() => { entry.finished = Date.now(); });
+    return entry.promise;
   }
 
   const server = http.createServer({ maxHeaderSize: 16 * 1024 }, async (req, res) => {
@@ -380,6 +427,9 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     const controller = new AbortController();
+    readers.add(controller);
+    res.once('finish', () => readers.delete(controller));
+    res.once('close', () => readers.delete(controller));
     req.on('aborted', () => controller.abort());
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
@@ -395,26 +445,8 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
           json(res, 200, await getRoute(url, controller.signal));
         } else if (req.method === 'POST') {
           queryParameters(url, []);
-          if (controls.postRoutes.has(url.pathname)) {
-            const result = await controls.post(url.pathname, await readJson(req), controller.signal);
-            json(res, result.status, result.value, result.sensitive);
-          } else if (url.pathname === '/api/actions') {
-            const job = await actionRequest(await readJson(req));
-            json(res, 202, { id: job.id });
-          } else if (url.pathname.startsWith('/api/processes/')) {
-            const result = await processRequest(url.pathname, await readJson(req), controller.signal);
-            json(res, result.status, result.value);
-          } else if (url.pathname.startsWith('/api/storage/')) {
-            const result = await storageRequest(url.pathname, await readJson(req));
-            json(res, result.status, result.value);
-          } else {
-            const match = /^\/api\/jobs\/([a-f0-9-]{36})\/cancel$/.exec(url.pathname);
-            if (!match || !jobs.has(match[1])) throw new HttpError(404, 'This API route was not found.');
-            objectFields(await readJson(req), []);
-            const job = jobs.get(match[1]);
-            if (job.status === 'running') job.controller.abort();
-            json(res, 200, { id: job.id, status: job.status });
-          }
+          const result = await postOnce(req, url.pathname, await readJson(req), controller.signal);
+          json(res, result.status, result.value, result.sensitive);
         } else throw new HttpError(405, 'This request method is not allowed.');
         return;
       }
@@ -439,15 +471,20 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
   authority = `127.0.0.1:${server.address().port}`;
   origin = `http://${authority}`;
   await audit({ action: 'dashboard', status: 'started' });
-  const close = async () => {
-    if (closing) return;
+  let closePromise;
+  const close = () => {
+    if (closePromise) return closePromise;
     closing = true;
+    closePromise = (async () => {
+    for (const reader of readers) reader.abort();
     activeJob?.controller.abort();
     const stopped = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     server.closeAllConnections();
     await stopped;
     if (activeJob?.promise) await activeJob.promise;
     await audit({ action: 'dashboard', status: 'stopped' });
+    })();
+    return closePromise;
   };
   return { url: `${origin}/#token=${token}`, server, close, token };
 }
