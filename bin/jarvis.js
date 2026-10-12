@@ -3,12 +3,13 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { Dashboard, initialState, safeRemote } from '../src/app.js';
-import { renderDashboard, gitSummary, NAV } from '../src/ui.js';
+import { renderDashboard, gitSummary, NAV, hardwareReportText } from '../src/ui.js';
 import { clean, friendlyError, bytes, fit } from '../src/format.js';
 import { demoState } from '../src/demo.js';
 import { searchContent, listDirectory, analyzeDisk, getGitStatus, listProcesses, listPorts, getProjectScripts, scanStorage, listScanLocations, getNetworkStatus, getAudioStatus, getSecurityStatus, getSystemSettings } from '../src/index.js';
 import { openBrowser } from '../src/browser.js';
 import { run } from '../src/run.js';
+import { getHardwareSnapshot, getDemoHardwareSnapshot } from '../src/hardware.js';
 
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const HELP = `Jarvis Workbench ${VERSION}
@@ -22,6 +23,7 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   jarvis disk [--json]                Measure workspace storage
   jarvis scan --path folder [--json]  Scan a folder or drive, read-only
   jarvis locations [--json]           List available drive/home/temp scopes
+  jarvis hardware [--json]            Inspect PC components, readings and findings
   jarvis processes [--json]           Inspect processes
   jarvis ports [--json]               Inspect local listening ports
   jarvis network [--json]             Inspect network adapters and saved profiles
@@ -35,9 +37,9 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   --case-sensitive    Match letter case in search
   --glob "*.js"       Limit search to matching filenames
   --json              Machine-readable output for a command
-  --demo              Explore a sample workspace without changing files
+  --demo              Explore sample dashboard or hardware data
   --snapshot          Print a dashboard frame instead of opening the TUI
-  --screen git        Initial dashboard screen (see 1-9 and 0 in the sidebar)
+  --screen git        Initial screen; includes hardware (I), control (0)
   --width 110         Snapshot width
   --port 4177         Browser port (default: a free port)
   --no-open           Print browser URL without opening it
@@ -46,7 +48,7 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   -h, --help          Show this help
   -v, --version       Show version
 
-Dashboard: 1-9 tools, 0 Control Center, $ Support Ashish, arrows select, Enter opens, Ctrl+P task palette,
+Dashboard: 1-9 tools, I Inside your PC, 0 Control Center, $ Support Ashish, arrows select, Enter opens, Ctrl+P task palette,
 B browser, A activity, storage: S select drive, C cleanup review, H recovery,
 / search/filter, R refresh, Esc back/cancel, Q quit.
 Use the dashboard to review system changes, file actions, Git uploads and scripts.
@@ -56,7 +58,7 @@ function parse(args) {
   const opts = { root: process.cwd(), command: 'dashboard', words: [] };
   const values = new Set(['--path', '--glob', '--width', '--screen', '--port']);
   const flags = new Set(['--json', '--regex', '--case-sensitive', '--demo', '--snapshot', '--no-color', '--ascii', '--web', '--no-open']);
-  const commands = new Set(['dashboard', 'web', 'status', 'search', 'files', 'disk', 'scan', 'locations', 'processes', 'ports', 'network', 'sound', 'security', 'settings', 'doctor']);
+  const commands = new Set(['dashboard', 'web', 'status', 'search', 'files', 'disk', 'scan', 'locations', 'hardware', 'processes', 'ports', 'network', 'sound', 'security', 'settings', 'doctor']);
   let literal = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -75,13 +77,22 @@ function parse(args) {
   opts.root = path.resolve(opts.path || process.cwd());
   if (opts.web) opts.command = 'web';
   if (opts.port && (!Number.isInteger(Number(opts.port)) || Number(opts.port) < 0 || Number(opts.port) > 65535)) throw new Error('--port must be between 0 and 65535.');
-  if (opts.screen && !NAV.some(v => v[0] === opts.screen)) throw new Error('Unknown screen. Choose overview, files, search, git, processes, ports, disk, scripts, recipes or control.');
+  if (opts.screen && !NAV.some(v => v[0] === opts.screen)) throw new Error('Unknown screen. Choose overview, files, search, git, processes, ports, disk, scripts, recipes, control or hardware.');
   if (opts.width && (!Number.isInteger(Number(opts.width)) || Number(opts.width) < 24 || Number(opts.width) > 300)) throw new Error('--width must be an integer between 24 and 300.');
   if (opts.command !== 'search' && opts.words.length) throw new Error('Use --path to choose a folder. See --help for examples.');
   return opts;
 }
 
 function print(value, json = false) { process.stdout.write((json ? JSON.stringify(value, null, 2) : value) + '\n'); }
+
+async function readHardwareForCli(demo = false) {
+  if (demo) return getDemoHardwareSnapshot();
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
+  try { return await getHardwareSnapshot({ signal: controller.signal }); }
+  finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel); }
+}
 
 async function main() {
   const options = parse(process.argv.slice(2));
@@ -104,9 +115,13 @@ async function main() {
     }));
     return print(`Node ${process.version}\n${checks.join('\n')}\nPlatform: ${process.platform}\nWorkspace: ${options.root}\nConnections: explicit Git, project, network and Windows security actions\nTelemetry: none`);
   }
+  if (options.command === 'hardware') {
+    const data = await readHardwareForCli(options.demo);
+    return print(options.json ? data : hardwareReportText(data), options.json);
+  }
   const inspectors = { network: getNetworkStatus, sound: getAudioStatus, security: getSecurityStatus, settings: getSystemSettings };
   if (inspectors[options.command]) {
-    if (options.demo) throw new Error('--demo is available for the dashboard only.');
+    if (options.demo) throw new Error('--demo is available for the dashboard and hardware reports.');
     const data = await inspectors[options.command]();
     if (options.json) return print(data, true);
     if (!data.available) return print(data.reason || data.warning || 'This system control is unavailable.');
@@ -128,6 +143,7 @@ async function main() {
         else if (state.screen === 'ports') state.ports = await listPorts();
         else if (state.screen === 'disk') state.disk = await analyzeDisk(options.root);
         else if (state.screen === 'scripts') state.scripts = await getProjectScripts(options.root);
+        else if (state.screen === 'hardware') state.hardware = await readHardwareForCli();
         else if (state.screen === 'control') state.control = await new Dashboard(options.root).readControl();
       }
       if (state.git) state.git.remoteUrl = safeRemote(state.git.remoteUrl);
@@ -137,7 +153,7 @@ async function main() {
     app.state.screen = options.screen || 'overview';
     return app.start();
   }
-  if (options.demo) throw new Error('--demo is available for the dashboard only.');
+  if (options.demo) throw new Error('--demo is available for the dashboard and hardware reports.');
   if (options.command === 'locations') {
     const locations = await listScanLocations();
     return print(options.json ? locations : locations.map(item => `${clean(item.label)}  ${clean(item.path)}  ${bytes(item.availableBytes)} available`).join('\n'), options.json);

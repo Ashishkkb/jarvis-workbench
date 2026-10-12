@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Dashboard, safeRemote } from '../src/app.js';
 import { demoState } from '../src/demo.js';
-import { friendlyError, width } from '../src/format.js';
-import { NAV, renderDashboard } from '../src/ui.js';
+import { clean, friendlyError, width } from '../src/format.js';
+import { NAV, renderDashboard, hardwareComponentText, hardwareReportText } from '../src/ui.js';
 import { OperationCoordinator } from '../src/operations.js';
 
 function dashboard({ demo = false } = {}) {
@@ -446,4 +446,175 @@ test('terminal cancellation preserves an uncertain native result and releases th
   assert.equal(app.state.busy, null);
   const release = shared.acquire('browser action after cancellation', new AbortController());
   release();
+});
+
+
+function hardwareFixture() {
+  return {
+    sampledAt: '2026-10-12T10:00:00.000Z', platform: 'fixture', demo: false,
+    summary: { attention: 1, observed: 1, unknown: 1 },
+    components: [
+      { id: 'cpu', title: 'Processor', status: 'warning', summary: 'Readings require review.',
+        metrics: [{ label: 'Usage', value: '0%' }, { label: 'Temperature', value: null, note: 'No exposed sensor.' }],
+        details: [{ label: 'Sockets', value: 0 }],
+        findings: [{ severity: 'warning', title: 'Fixture warning', explanation: 'A measured condition needs review.', recommendation: 'Review the reported value.' }],
+        devices: [{ name: 'Fixture device', details: [{ label: 'Speed', value: null }] }],
+        limitations: ['This is not a physical fault test.'], actions: [{ label: 'Review processes', screen: 'processes' }] },
+      { id: 'gpu', title: 'Graphics', status: 'unknown', summary: 'No provider is available.', metrics: [], details: [], findings: [], devices: [], limitations: [], actions: [] },
+      { id: 'memory', title: 'Memory', status: 'ok', summary: 'Usage was reported.', metrics: [], details: [], findings: [], devices: [], limitations: [], actions: [] },
+    ],
+    limitations: ['A reading does not certify component health.'],
+  };
+}
+
+test('hardware details preserve zero, explain unknown sensors, and include findings and device limits', () => {
+  const snapshot = hardwareFixture();
+  const details = hardwareComponentText(snapshot.components[0]);
+  assert.match(details, /Usage: 0%/);
+  assert.match(details, /Sockets: 0/);
+  assert.match(details, /Temperature: Unknown/);
+  assert.match(details, /No exposed sensor/);
+  assert.match(details, /Speed: Unknown/);
+  assert.match(details, /Fixture warning/);
+  assert.match(details, /Next step: Review the reported value/);
+  assert.match(details, /This is not a physical fault test/);
+  assert.doesNotMatch(details, /\bnull\b|\bundefined\b|\[object Object\]/);
+  const report = hardwareReportText(snapshot);
+  assert.match(report, /1 need attention \/ 1 observed \/ 1 unknown/);
+  assert.match(report, /Status: Unknown/);
+  assert.match(report, /Status: Observed/);
+  assert.match(report, /REPORT LIMITATIONS/);
+  assert.match(report, /does not certify hardware health/);
+});
+
+test('hardware terminal navigation exposes details and related tools without changing numeric shortcuts', async () => {
+  const { app } = dashboard({ demo: true });
+  await app.onKey('i', { name: 'i' });
+  assert.equal(app.state.screen, 'hardware');
+  app.state.hardware = hardwareFixture();
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(app.state.modal.type, 'text');
+  assert.match(app.state.modal.content, /Sampled: 2026-10-12/);
+  assert.match(app.state.modal.content, /Temperature: Unknown/);
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(app.state.modal.type, 'palette');
+  assert.equal(app.state.modal.choices[0].screen, 'processes');
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(app.state.screen, 'processes');
+  await app.onKey('0', { name: '0' });
+  assert.equal(app.state.screen, 'control');
+  await app.onKey('9', { name: '9' });
+  assert.equal(app.state.screen, 'recipes');
+});
+
+test('hardware details and list stay bounded at small terminal sizes and sanitize provider strings', () => {
+  const { app } = dashboard();
+  app.state.screen = 'hardware';
+  app.state.hardware = hardwareFixture();
+  app.state.hardware.components[0].title = 'CPU\x1b[2J\x1b]0;owned\x07';
+  app.state.hardware.components[0].devices[0].name = '\x1b[31mdevice\x1b[0m';
+  for (const columns of [56, 80, 110]) {
+    for (const rows of [17, 32]) {
+      let frame = renderDashboard(app.state, columns, rows, { color: false });
+      assert.equal(frame.split('\r\n').length, rows);
+      assert.ok(frame.split('\r\n').every(line => width(line) === columns));
+      assert.doesNotMatch(frame, /\x1b|owned/);
+      app.state.modal = { type: 'text', title: 'Details', content: hardwareComponentText(app.state.hardware.components[0]) };
+      frame = renderDashboard(app.state, columns, rows, { color: false });
+      assert.equal(frame.split('\r\n').length, rows);
+      assert.ok(frame.split('\r\n').every(line => width(line) === columns));
+      assert.doesNotMatch(frame, /\x1b|owned/);
+      app.state.modal = null;
+    }
+  }
+});
+
+test('hardware refresh is cancellable, retains the previous sample, and releases operation ownership', async () => {
+  const { app } = dashboard();
+  const old = hardwareFixture();
+  app.state.screen = 'hardware';
+  app.state.hardware = old;
+  let entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  let received;
+  app.options.getHardwareSnapshot = ({ signal }) => new Promise((resolve, reject) => {
+    received = signal;
+    signal.addEventListener('abort', () => reject(new Error('Cancelled fixture')), { once: true });
+    entered();
+  });
+  const pending = app.refresh();
+  await ready;
+  assert.match(app.state.busy, /Reading hardware/);
+  await app.onKey(undefined, { name: 'escape' });
+  await pending;
+  assert.equal(received.aborted, true);
+  assert.equal(app.state.hardware, old);
+  assert.match(app.state.message.text, /Previous readings are still shown/);
+  assert.equal(app.state.message.tone, 'warn');
+  assert.equal(app.state.busy, null);
+  assert.equal(app.operations.active, null);
+  app.options.getHardwareSnapshot = async () => ({ ...old, sampledAt: '2026-10-12T10:01:00.000Z' });
+  await app.onKey('r', { name: 'r' });
+  assert.equal(app.state.hardware.sampledAt, '2026-10-12T10:01:00.000Z');
+});
+
+
+test('terminal theme preserves monochrome content and cell bounds across compact and wide layouts', () => {
+  const { app } = dashboard({ demo: true });
+  for (const columns of [56, 88, 110]) {
+    for (const lines of [17, 24, 32]) {
+      for (const [screen] of NAV) {
+        app.state.screen = screen;
+        for (const ascii of [false, true]) {
+          const plain = renderDashboard(app.state, columns, lines, { color: false, ascii });
+          const styled = renderDashboard(app.state, columns, lines, { color: true, ascii });
+          const plainLines = plain.split('\r\n');
+          const styledLines = styled.split('\r\n');
+          assert.equal(plainLines.length, lines);
+          assert.ok(styledLines.every(line => width(line) === columns), `${screen} at ${columns}x${lines}`);
+          assert.deepEqual(styledLines.map(clean), plainLines, `${screen}: colors must not change the text`);
+          assert.ok(!plain.includes('\x1b'));
+          if (ascii) assert.doesNotMatch(plain, /[\u2500\u2502]/);
+        }
+      }
+    }
+  }
+});
+
+test('compact sidebars keep the active tool visible without overwriting it with utility labels', () => {
+  const { app } = dashboard({ demo: true });
+  for (const [screen, title] of NAV) {
+    app.state.screen = screen;
+    const frame = renderDashboard(app.state, 110, 17, { color: false });
+    assert.ok(frame.includes(`> ${screen === 'hardware' ? 'I' : (NAV.findIndex(item => item[0] === screen) + 1) % 10}  ${title}`), title);
+  }
+});
+
+test('long-running task labels leave cancellation controls visible in narrow terminals', () => {
+  const { app } = dashboard({ demo: true });
+  app.state.busy = 'Reading a very long name '.repeat(20);
+  for (const scanMonitoring of [false, true]) {
+    app.state.scanMonitoring = scanMonitoring;
+    const frame = renderDashboard(app.state, 56, 17, { color: false });
+    const status = frame.split('\r\n').at(-3);
+    assert.match(status, /WORKING/);
+    assert.ok(status.endsWith(scanMonitoring ? '[Esc] Stop monitoring ' : '[Esc] Cancel '));
+    assert.equal(width(status), 56);
+  }
+});
+
+
+test('hardware detail modals wrap long identifiers without losing their tails', () => {
+  const { app } = dashboard({ demo: true });
+  app.state.screen = 'hardware';
+  for (const columns of [80, 110]) {
+    for (const middle of ['X'.repeat(240), '\u754c'.repeat(120)]) {
+      app.state.modal = { type: 'text', title: 'Hardware details', content: 'Board identifier: START-' + middle + '-END\nNext reading: available' };
+      const frame = renderDashboard(app.state, columns, 32, { color: false });
+      assert.ok(frame.includes('START-'));
+      assert.ok(frame.includes('-END'), 'the tail of an unbroken identifier must be readable');
+      assert.ok(frame.includes('Next reading: available'));
+      assert.ok(frame.split('\r\n').every(line => width(line) === columns));
+    }
+  }
 });

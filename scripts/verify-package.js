@@ -128,19 +128,22 @@ try {
   await assert.rejects(runShim('jarvis', ['--definitely-invalid-option']), /Unknown option/);
   const snapshot = (await runShim('jv', ['--demo', '--snapshot', '--ascii', '--no-color', '--width', '80'])).stdout;
   assert.match(snapshot, /Jarvis/i);
+  const hardwareReport = JSON.parse((await runShim('jarvis', ['hardware', '--demo', '--json'])).stdout);
+  assert.equal(hardwareReport.demo, true);
+  assert.equal(hardwareReport.components.length, 9);
   const files = JSON.parse((await runShim('jarvis', ['files', '--json', '--path', workspace])).stdout);
   assert(files.entries.some(file => file.name === 'hello world.txt'), 'Installed CLI must read the requested workspace');
   const require = createRequire(path.join(installedRoot, 'package.json'));
   const api = await import(pathToFileURL(require.resolve(manifest.name)).href);
   const ui = await import(pathToFileURL(require.resolve(`${manifest.name}/ui`)).href);
-  for (const name of ['searchContent', 'listDirectory', 'scanStorage', 'startServer', 'ActivityLog', 'planFileAction', 'executeFileAction', 'getNetworkStatus', 'getAudioStatus', 'getSecurityStatus', 'getSystemSettings']) assert.equal(typeof api[name], 'function', `Missing library export ${name}`);
+  for (const name of ['searchContent', 'listDirectory', 'scanStorage', 'startServer', 'ActivityLog', 'planFileAction', 'executeFileAction', 'getNetworkStatus', 'getAudioStatus', 'getSecurityStatus', 'getSystemSettings', 'getHardwareSnapshot', 'getDemoHardwareSnapshot']) assert.equal(typeof api[name], 'function', `Missing library export ${name}`);
   assert.equal(typeof ui.renderDashboard, 'function');
   assert.equal(api.getAbout().version, manifest.version);
   assert((await api.listDirectory(workspace)).entries.some(file => file.name === 'hello world.txt'));
   console.log('Checking packaged browser assets and API authentication...');
   server = await api.startServer({ root: workspace, demo: true, activity: { append: async () => {}, read: async () => [] } });
   const base = new URL(server.url).origin;
-  for (const [route, type] of [['/', 'text/html'], ['/app.js', 'javascript'], ['/styles.css', 'text/css']]) {
+  for (const [route, type] of [['/', 'text/html'], ['/app.js', 'javascript'], ['/styles.css', 'text/css'], ['/hardware.css', 'text/css']]) {
     const response = await fetch(base + route, { signal: AbortSignal.timeout(10_000) });
     assert.equal(response.status, 200, `Installed browser asset ${route} must load`);
     assert(response.headers.get('content-type')?.includes(type));
@@ -150,6 +153,11 @@ try {
   const about = await fetch(`${base}/api/about`, { headers: { authorization: `Bearer ${server.token}` }, signal: AbortSignal.timeout(10_000) });
   assert.equal(about.status, 200);
   assert.equal((await about.json()).version, manifest.version);
+  const hardwareResponse = await fetch(`${base}/api/hardware`, { headers: { authorization: `Bearer ${server.token}` }, signal: AbortSignal.timeout(10_000) });
+  assert.equal(hardwareResponse.status, 200);
+  const hardwareData = await hardwareResponse.json();
+  assert.equal(hardwareData.demo, true);
+  assert.equal(hardwareData.components.length, 9);
   await server.close(); server = null;
   const helpers = [...packedPaths].filter(file => file.endsWith('.ps1'));
   assert(helpers.length >= 4, 'Native Windows helpers must be included');

@@ -8,6 +8,12 @@ const ICONS = {
   search: ['M21 21l-4.35-4.35', 'M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z'],
   branch: ['M6 3v12a3 3 0 1 0 3 3M6 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 9a9 9 0 0 1-9 9'],
   cpu: ['M8 8h8v8H8zM4 4h16v16H4zM8 1v3M16 1v3M8 20v3M16 20v3M1 8h3M1 16h3M20 8h3M20 16h3'],
+  memory: ['M3 6h18v12H3zM6 9h3v5H6zM12 9h3v5h-3zM18 9v5M6 18v3M10 18v3M14 18v3M18 18v3'],
+  motherboard: ['M3 3h18v18H3zM6 6h7v7H6zM16 6h2M16 9h2M6 17h12M16 12v2M9 13v4'],
+  gpu: ['M2 5h20v13H2zM6 18v3M10 18v3M14 18v3M18 18v3', 'M11 11.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM19 11.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z'],
+  battery: ['M2 6h17v12H2zM22 10v4M6 10v4M10 10v4M14 10v4'],
+  plug: ['M8 2v5M16 2v5M6 7h12v4a6 6 0 0 1-12 0V7ZM12 17v5'],
+  cooling: ['M12 10c-5-8 6-10 6-4 0 3-3 5-6 6M14 12c8-5 10 6 4 6-3 0-5-3-6-6M12 14c5 8-6 10-6 4 0-3 3-5 6-6M10 12C2 17 0 6 6 6c3 0 5 3 6 6'],
   audio: ['M11 5 6 9H2v6h4l5 4V5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14'],
   settings: ['M4 7h16M4 17h16M8 4v6M16 14v6'],
   wifi: ['M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M9 16a5 5 0 0 1 6 0M12 20h.01'],
@@ -45,7 +51,8 @@ const NAV = [
   { id: 'files', title: 'Files', icon: 'folder', description: 'Browse folders and preview files' },
   { id: 'search', title: 'Search', icon: 'search', description: 'Find words, patterns, and code' },
   { id: 'git', title: 'Git & sync', icon: 'branch', description: 'Review, save, and upload your work' },
-  { id: 'processes', title: 'Processes', icon: 'cpu', group: 'Your computer', description: 'See what is running' },
+  { id: 'hardware', title: 'Inside your PC', icon: 'motherboard', group: 'Your computer', description: 'Explore your hardware and the readings it reports' },
+  { id: 'processes', title: 'Processes', icon: 'cpu', description: 'See what is running' },
   { id: 'ports', title: 'Ports', icon: 'network', description: 'Find what is using a port' },
   { id: 'storage', title: 'Storage', icon: 'drive', description: 'Understand space and clean up safely' },
   { id: 'network', title: 'Network', icon: 'wifi', group: 'Controls', description: 'Wi-Fi, adapters, IP addresses, and DNS' },
@@ -55,13 +62,14 @@ const NAV = [
   { id: 'scripts', title: 'Project tasks', icon: 'terminal', group: 'Tools', description: 'Run your project’s named commands' },
   { id: 'activity', title: 'Activity', icon: 'activity', description: 'A record of your local actions' },
 ];
-const COLORS = ['#799f59', '#a7bf7a', '#c5d7a3', '#d5c692', '#9fbaa1', '#758b69', '#e4e9db'];
+const COLORS = ['#7664e8', '#50b4d1', '#9b8df0', '#e2ae64', '#69baa9', '#7e97c6', '#e8ebf5'];
 const state = {
   screen: 'overview', root: '', overview: null, about: null, activity: [], git: null,
   files: null, filePath: '', fileFilter: '', search: { q: '', regex: false, caseSensitive: false, glob: '', result: null },
   processes: null, processFilter: '', processSort: 'memory', ports: null, portFilter: '', scripts: [], recipes: [],
   storage: { locations: [], history: [], path: '', scan: null, selected: new Set(), tab: 'overview', stale: false },
   network: null, audio: null, security: null, settings: null,
+  hardware: null, hardwareSelected: 'cpu', hardwareError: null,
   activeJob: null, loading: false, requestId: 0, controller: null, toastTimer: null,
 };
 const $ = selector => document.querySelector(selector);
@@ -119,13 +127,14 @@ function textButton(text, onClick, name = 'arrow') {
   return el('button', { type: 'button', class: 'text-button', onClick }, text, name ? icon(name) : null);
 }
 function bytes(value, digits = 1) {
+  if (!['number', 'string'].includes(typeof value) || (typeof value === 'string' && !value.trim())) return '—';
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return '—';
   if (n === 0) return '0 B';
-  const index = Math.min(4, Math.floor(Math.log(n) / Math.log(1024)));
+  const index = Math.max(0, Math.min(4, Math.floor(Math.log(n) / Math.log(1024))));
   return `${(n / 1024 ** index).toLocaleString(undefined, { maximumFractionDigits: index ? digits : 0 })} ${['B', 'KB', 'MB', 'GB', 'TB'][index]}`;
 }
-const number = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
+const number = value => ['number', 'string'].includes(typeof value) && !(typeof value === 'string' && !value.trim()) && Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
 const basename = value => String(value || '').replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || value || 'Workspace';
 function timestamp(value) {
   const date = new Date(value || '');
@@ -199,8 +208,11 @@ function toast(message, error = false) {
 function report(error) { if (error?.name !== 'AbortError') toast(error?.message || String(error), true); }
 function handle(fn) { return event => Promise.resolve().then(() => fn(event)).catch(report); }
 
-function heading(title, description, actions = [], eyebrow = 'Local control center') {
-  return el('div', { class: 'page-heading' }, el('div', {}, el('p', { class: 'eyebrow' }, eyebrow), el('h1', {}, title), el('p', { class: 'page-description' }, description)), actions.length ? el('div', { class: 'heading-actions' }, actions) : null);
+function heading(title, description, actions = [], eyebrow = 'Your local workspace') {
+  const screen = NAV.find(item => item.id === state.screen);
+  return el('div', { class: 'page-heading' }, el('div', { class: 'heading-copy' }, el('p', { class: 'eyebrow' }, eyebrow),
+    el('div', { class: 'page-title-row' }, el('span', { class: 'page-heading-icon', 'aria-hidden': 'true' }, icon(screen?.icon || 'grid')), el('h1', {}, title)),
+    el('p', { class: 'page-description' }, description)), actions.length ? el('div', { class: 'heading-actions' }, actions) : null);
 }
 function panel(title, subtitle, content, action = null, className = '') {
   return el('section', { class: `panel ${className}` }, el('div', { class: 'panel-header' }, el('div', {}, el('h2', {}, title), subtitle ? el('p', { class: 'panel-subtitle' }, subtitle) : null), action), el('div', { class: 'panel-body' }, content));
@@ -225,7 +237,7 @@ function donut(parts, label, caption, large = false) {
   svg.setAttribute('viewBox', '0 0 120 120');
   svg.setAttribute('aria-hidden', 'true');
   const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  ring.setAttribute('cx', '60'); ring.setAttribute('cy', '60'); ring.setAttribute('r', '49'); ring.setAttribute('stroke', '#edf1e4');
+  ring.setAttribute('cx', '60'); ring.setAttribute('cy', '60'); ring.setAttribute('r', '49'); ring.setAttribute('stroke', '#e8ecf5');
   svg.append(ring);
   const circumference = Math.PI * 98;
   const total = parts.reduce((sum, part) => sum + Math.max(0, Number(part.value) || 0), 0);
@@ -259,7 +271,9 @@ function renderNavigation() {
 
 function renderLoading(screen) {
   const item = NAV.find(entry => entry.id === screen);
-  setPage(heading(item?.title || 'Workspace', item?.description || ''), el('div', { class: 'panel loading-state', role: 'status' }, el('span', { class: 'spinner' }), el('p', {}, `Reading ${item?.title.toLowerCase() || 'your workspace'}…`)));
+  setPage(heading(item?.title || 'Workspace', item?.description || ''), el('div', { class: 'panel loading-state', role: 'status' }, el('span', { class: 'spinner' }),
+    el('p', {}, screen === 'hardware' ? 'Reading supported hardware interfaces. This can take up to 35 seconds.' : `Reading ${item?.title.toLowerCase() || 'your workspace'}...`),
+    screen === 'hardware' ? el('p', { class: 'muted-caption' }, 'Unavailable sensor readings will be shown as unknown.') : null));
 }
 function renderError(error) {
   const disconnected = !token || error.status === 401;
@@ -267,7 +281,7 @@ function renderError(error) {
 }
 function renderCurrent() {
   renderNavigation();
-  const renderers = { overview: renderOverview, files: renderFiles, search: renderSearch, git: renderGit, processes: renderProcesses, ports: renderPorts, storage: renderStorage, network: renderNetwork, audio: renderAudio, security: renderSecurity, settings: renderSettings, scripts: renderScripts, activity: renderActivity };
+  const renderers = { overview: renderOverview, hardware: renderHardware, files: renderFiles, search: renderSearch, git: renderGit, processes: renderProcesses, ports: renderPorts, storage: renderStorage, network: renderNetwork, audio: renderAudio, security: renderSecurity, settings: renderSettings, scripts: renderScripts, activity: renderActivity };
   renderers[state.screen]?.();
 }
 async function bootstrapWorkspace() {
@@ -282,9 +296,11 @@ async function navigate(screen, { quiet = false } = {}) {
   state.controller?.abort();
   state.controller = new AbortController();
   const requestId = ++state.requestId;
-  state.screen = screen; state.loading = true;
+  state.screen = screen; state.loading = true; page.setAttribute('aria-busy', 'true');
   renderNavigation();
+  if (screen === 'hardware') state.hardwareError = null;
   if (!quiet) renderLoading(screen);
+  else if (screen === 'hardware') renderHardware();
   try {
     const signal = state.controller.signal;
     const needsBootstrap = !state.root;
@@ -298,6 +314,11 @@ async function navigate(screen, { quiet = false } = {}) {
       if (results[1].status === 'fulfilled') { state.about = results[1].value; $('#footer-version').textContent = `${state.about.name || 'Jarvis Workbench'} ${state.about.version ? `v${state.about.version}` : ''}`; }
     } else if (screen === 'files') state.files = await api(`/api/files?path=${encodeURIComponent(state.filePath)}`, { signal });
     else if (screen === 'git') state.git = await api('/api/git', { signal });
+    else if (screen === 'hardware') {
+      const snapshot = await api('/api/hardware', { signal });
+      if (requestId !== state.requestId) return;
+      state.hardware = snapshot; state.hardwareError = null;
+    }
     else if (screen === 'processes') state.processes = await api('/api/processes', { signal });
     else if (screen === 'ports') state.ports = await api('/api/ports', { signal });
     else if (['network', 'audio', 'security', 'settings'].includes(screen)) state[screen] = await api(`/api/${screen}`, { signal });
@@ -310,11 +331,13 @@ async function navigate(screen, { quiet = false } = {}) {
       if (!state.storage.path || (state.overview?.demo && state.storage.path === state.root)) state.storage.path = state.overview?.demo ? state.storage.locations[0]?.path || '' : state.root || state.storage.locations[0]?.path || '';
     }
     if (requestId !== state.requestId) return;
-    state.loading = false; renderCurrent();
+    state.loading = false; page.setAttribute('aria-busy', 'false'); renderCurrent();
     if (!quiet) window.scrollTo({ top: 0, behavior: 'instant' });
   } catch (error) {
     if (error.name === 'AbortError' || requestId !== state.requestId) return;
-    state.loading = false; renderError(error);
+    state.loading = false; page.setAttribute('aria-busy', 'false');
+    if (screen === 'hardware') { state.hardwareError = error.message || 'Hardware readings are unavailable.'; renderHardware(); }
+    else renderError(error);
   }
 }
 
@@ -351,24 +374,198 @@ function activityPreview() {
 function renderOverview() {
   const system = state.overview?.system || {};
   const git = state.git;
-  const used = Math.max(0, Number(system.memoryTotal || 0) - Number(system.memoryFree || 0));
-  const percentage = system.memoryTotal ? Math.round(used / system.memoryTotal * 100) : 0;
-  const machine = panel('System memory', 'Current memory allocation and processor count.', el('div', {},
-    el('div', { class: 'machine-summary' }, donut([{ value: used }, { value: system.memoryFree || 0, color: '#e6eedb' }], `${percentage}%`, 'MEMORY IN USE'), el('div', { class: 'machine-values' }, el('div', {}, el('span', { class: 'legend-dot swatch-0' }), el('small', {}, 'In use'), el('strong', {}, bytes(used))), el('div', {}, el('span', { class: 'legend-dot swatch-6' }), el('small', {}, 'Available'), el('strong', {}, bytes(system.memoryFree))))),
-    el('div', { class: 'machine-specs' }, el('span', {}, icon('cpu'), `${number(system.cpus)} CPU cores`), el('span', {}, icon('clock'), `Up ${duration(system.uptime)}`))), textButton('Details', () => navigate('processes')));
-  const storage = panel('Storage analysis', '', el('div', {}, el('div', {}, el('p', {}, 'See where your space goes. Review old temporary files before moving anything.'), textButton('Explore storage', () => navigate('storage'))), el('div', { class: 'storage-illustration', 'aria-hidden': 'true' })), badge('ON YOUR DEVICE', ''), 'storage-teaser');
-  const storageBody = storage.querySelector('.panel-body');
-  storageBody.replaceChildren(...storageBody.firstChild.childNodes);
-  const quick = (title, description, name, screen) => el('button', { type: 'button', class: 'quick-action', onClick: () => navigate(screen) }, el('span', { class: 'quick-action-icon' }, icon(name)), el('span', {}, el('strong', {}, title), el('p', {}, description)), icon('arrow'));
+  const known = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const hasMemory = known(system.memoryTotal) && system.memoryTotal > 0 && known(system.memoryFree) && system.memoryFree <= system.memoryTotal;
+  const used = hasMemory ? system.memoryTotal - system.memoryFree : null;
+  const percentage = hasMemory ? Math.round(used / system.memoryTotal * 100) : null;
+  const platform = ({ win32: 'Windows', darwin: 'macOS', linux: 'Linux' })[system.platform] || system.platform || 'Local computer';
+  const hero = el('section', { class: 'overview-hero', 'aria-label': 'Current workspace' },
+    el('div', { class: 'overview-intro' }, el('p', { class: 'overview-kicker' }, icon('folder'), 'YOUR WORKSPACE'),
+      el('h2', { title: state.root }, basename(state.root)), el('p', {}, 'Open a file, find an answer, or take care of your computer. Start with what you need.'),
+      el('div', { class: 'overview-actions' }, button('Browse files', 'folder', () => navigate('files'), 'primary'), button('Find in files', 'search', () => navigate('search')))),
+    el('div', { class: 'overview-workspace' }, badge(state.overview?.demo ? 'Demo workspace' : 'Local session', state.overview?.demo ? 'warn' : '', state.overview?.demo ? 'info' : 'shield'),
+      el('div', { class: 'workspace-health' }, el('span', {}, 'Workspace folder'), el('code', { title: state.root }, state.root || 'Not reported')),
+      el('div', { class: 'workspace-health' }, el('span', {}, 'Git status'), el('strong', {}, gitLabel(git))),
+      el('div', { class: 'workspace-health' }, el('span', {}, platform), el('span', {}, known(system.uptime) ? `Running for ${duration(system.uptime)}` : 'Uptime not reported'))));
+  const machine = panel('Memory & processor', 'A snapshot of what your computer is using.', el('div', {},
+    el('div', { class: 'machine-summary' }, donut(hasMemory ? [{ value: used }, { value: system.memoryFree, color: '#e8ecf5' }] : [], percentage === null ? '—' : `${percentage}%`, hasMemory ? 'MEMORY IN USE' : 'NOT REPORTED'),
+      el('div', { class: 'machine-values' }, el('div', {}, el('span', { class: 'legend-dot swatch-0' }), el('small', {}, 'In use'), el('strong', {}, bytes(used))), el('div', {}, el('span', { class: 'legend-dot swatch-6' }), el('small', {}, 'Available'), el('strong', {}, bytes(hasMemory ? system.memoryFree : null))))),
+    el('div', { class: 'machine-specs' }, el('span', {}, icon('cpu'), `${number(system.cpus)} logical processors`), el('span', {}, icon('clock'), known(system.uptime) ? `Up ${duration(system.uptime)}` : 'Uptime not reported')),
+    percentage !== null && percentage >= 90 ? el('p', { class: 'memory-pressure-note' }, icon('info'), 'Memory is running tight. Review open apps in Processes before closing anything.') : null), textButton('View processes', () => navigate('processes')));
+  const storage = panel('Make room for what matters', 'Storage, explained', [el('div', {}, el('p', {}, 'Find large files and review temporary files. You decide what stays and what goes.'), textButton('Open storage', () => navigate('storage'))), el('div', { class: 'storage-illustration', 'aria-hidden': 'true' })], badge('Read-only analysis', '', 'shield'), 'storage-teaser');
+  const quick = (title, description, name, screen) => el('button', { type: 'button', class: 'quick-action quick-action-card', 'aria-label': title, onClick: () => navigate(screen) },
+    el('span', { class: 'quick-action-icon' }, icon(name)), el('span', { class: 'quick-action-copy' }, el('strong', {}, title), el('p', {}, description)), icon('arrow'));
   setPage(
-    heading('Overview', 'Files, development tools, and system controls in one local workspace.', [button('Toolbox', 'sparkles', handle(openToolbox)), button('Refresh', 'refresh', () => navigate('overview'), 'primary')], 'Jarvis Workbench'),
-    state.overview?.demo ? notice('Demo workspace — all sample data is labeled. Local actions are disabled by the server.', 'warning') : null,
+    heading('Overview', 'Your files, projects, and computer. A little easier to manage.', [button('Command reference', 'sparkles', handle(() => openToolbox())), button('Refresh', 'refresh', () => navigate('overview'))], 'Jarvis Workbench'),
+    state.overview?.demo ? notice('Demo workspace — sample data only. Local actions are disabled.', 'warning') : null,
     state.overview?.activityWarning ? notice(state.overview.activityWarning, 'warning') : null,
-    el('div', { class: 'metrics' }, metric('Files to save', git?.isRepo ? number(git.changes?.length || 0) : '—', git?.isRepo ? (git.clean ? 'Your working tree is clean' : 'Review before you commit') : 'Open a Git project to begin', 'file', !!git?.clean), metric('Ready to upload', git?.isRepo ? number(git.ahead || 0) : '—', git?.upstream ? 'Commits since last fetched remote' : 'No upstream branch configured', 'upload'), metric('Memory available', bytes(system.memoryFree), `of ${bytes(system.memoryTotal)} total memory`, 'cpu'), metric('Logical CPU cores', number(system.cpus), system.hostname || 'On your computer', 'grid')),
-    el('div', { class: 'overview-grid' }, el('div', { class: 'stack' }, gitSummaryCard(), panel('Recent activity', 'Recent scans, changes, and system actions.', activityPreview(), textButton('View all', () => navigate('activity')))), el('div', { class: 'stack' }, machine, storage)),
-    el('div', { class: 'section-caption' }, el('h2', {}, 'Workspace tools'), el('span', { class: 'subtle', text: 'Choose a task to get started' })),
-    el('div', { class: 'quick-actions' }, quick('Find anything', 'Search text and code across your workspace.', 'search', 'search'), quick('Save & sync', 'Know what’s saved and what’s uploaded.', 'branch', 'git'), quick('Analyze storage', 'Understand storage. Clean up with a plan.', 'drive', 'storage')),
+    hero,
+    el('div', { class: 'metrics' },
+      metric('Files to review', git?.isRepo ? number(git.changes?.length || 0) : '—', git?.isRepo ? (git.clean ? 'Working tree is clean' : 'Changes waiting to be saved') : 'No Git repository in this folder', 'file', !!git?.clean),
+      metric('Commits to upload', git?.isRepo && git.upstream ? number(git.ahead) : '—', git?.upstream ? 'Compared with your last fetch' : 'No upstream branch configured', 'upload'),
+      metric('Available memory', bytes(hasMemory ? system.memoryFree : null), hasMemory ? `of ${bytes(system.memoryTotal)} usable memory` : 'Not reported by this computer', 'memory'),
+      metric('Logical processors', number(system.cpus), system.cpuModel || 'Reported by your operating system', 'cpu')),
+    hardwareOverviewEntry(),
+    el('div', { class: 'overview-grid' }, el('div', { class: 'stack' }, gitSummaryCard(), panel('Recent activity', 'What happened in your workspace.', activityPreview(), textButton('View activity', () => navigate('activity')))), el('div', { class: 'stack' }, machine, storage)),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Everyday tools'), el('span', { class: 'subtle' }, 'A direct path to the task at hand')),
+    el('div', { class: 'quick-actions quick-action-grid' }, quick('Search your files', 'Find text, code, and the details you need.', 'search', 'search'), quick('Review storage', 'Understand disk usage and cleanup options.', 'drive', 'storage'), quick('Manage your network', 'Wi-Fi connections, adapters, and DNS.', 'wifi', 'network'), quick('Adjust sound', 'Volume, microphones, and output devices.', 'audio', 'audio'), quick('Check protection', 'Defender status and available scans.', 'shield', 'security'), quick('Run project tasks', 'Review a project command before running it.', 'terminal', 'scripts')),
   );
+}
+
+
+const HARDWARE_PARTS = [
+  { id: 'cpu', title: 'Processor', icon: 'cpu', short: 'CPU' },
+  { id: 'memory', title: 'Memory', icon: 'memory', short: 'RAM' },
+  { id: 'motherboard', title: 'Motherboard', icon: 'motherboard', short: 'BOARD' },
+  { id: 'gpu', title: 'Graphics', icon: 'gpu', short: 'GPU' },
+  { id: 'storage', title: 'Storage', icon: 'drive', short: 'DRIVES' },
+  { id: 'battery', title: 'Battery', icon: 'battery', short: 'POWER' },
+  { id: 'network', title: 'Network', icon: 'wifi', short: 'NETWORK' },
+  { id: 'ports', title: 'Ports & devices', icon: 'plug', short: 'I/O' },
+  { id: 'cooling', title: 'Cooling', icon: 'cooling', short: 'THERMAL' },
+];
+const HARDWARE_STATUS = {
+  ok: { label: 'No alerts reported', icon: 'check' },
+  warning: { label: 'Needs attention', icon: 'alert' },
+  critical: { label: 'Needs urgent attention', icon: 'alert' },
+  unknown: { label: 'Health unknown', icon: 'info' },
+  absent: { label: 'Not detected', icon: 'info' },
+};
+function hardwareText(value, fallback = 'Unknown') {
+  return ['string', 'number', 'boolean'].includes(typeof value) && String(value).trim() ? String(value) : fallback;
+}
+function hardwareItems(value) { return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && !Array.isArray(item)) : []; }
+function normalizeHardwareComponents(snapshot = state.hardware) {
+  const components = hardwareItems(snapshot?.components);
+  return HARDWARE_PARTS.map(part => {
+    const source = components.find(item => item.id === part.id) || {};
+    return { ...part, ...source, id: part.id, icon: part.icon, short: part.short, mapTitle: part.title,
+      title: hardwareText(source.title, part.title),
+      status: Object.hasOwn(HARDWARE_STATUS, source.status) ? source.status : 'unknown',
+      summary: hardwareText(source.summary, 'No supported health reading was available for this component.'),
+      metrics: hardwareItems(source.metrics), details: hardwareItems(source.details),
+      findings: hardwareItems(source.findings), devices: hardwareItems(source.devices), actions: hardwareItems(source.actions),
+      limitations: Array.isArray(source.limitations) ? source.limitations.filter(item => typeof item === 'string' && item.trim()) : [],
+    };
+  });
+}
+function hardwareBadge(status) {
+  const value = Object.hasOwn(HARDWARE_STATUS, status) ? HARDWARE_STATUS[status] : HARDWARE_STATUS.unknown;
+  return el('span', { class: `hardware-status is-${Object.hasOwn(HARDWARE_STATUS, status) ? status : 'unknown'}` }, icon(value.icon), value.label);
+}
+function hardwareOverviewEntry() {
+  return el('button', { type: 'button', class: 'hardware-entry', onClick: () => navigate('hardware') },
+    el('span', { class: 'hardware-entry-art', 'aria-hidden': 'true' }, icon('motherboard')),
+    el('span', { class: 'hardware-entry-copy' }, el('span', { class: 'hardware-kicker' }, 'Meet your machine'), el('strong', {}, 'A closer look inside your PC'), el('span', {}, 'Explore the parts, understand their readings, and see what needs attention.')),
+    el('span', { class: 'hardware-entry-link' }, 'Explore hardware', icon('arrow')));
+}
+async function refreshHardware() {
+  const preserveFocus = document.activeElement?.id === 'hardware-refresh';
+  await navigate('hardware', { quiet: !!state.hardware });
+  if (preserveFocus && state.screen === 'hardware') $('#hardware-refresh')?.focus({ preventScroll: true });
+}
+function selectHardwareComponent(id, { focusDetails = false } = {}) {
+  if (!HARDWARE_PARTS.some(part => part.id === id)) return;
+  state.hardwareSelected = id;
+  renderHardware();
+  const target = $(focusDetails ? '#hardware-component-title' : `#hardware-part-${id}`);
+  target?.focus({ preventScroll: !focusDetails });
+}
+function hardwareCircuit() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 500 510'); svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('class', 'hardware-circuit'); svg.setAttribute('aria-hidden', 'true');
+  for (const line of ['M0 35h130v70h90v105h280', 'M0 48h117v70h90v110h293', 'M75 0v250h60v65h365', 'M87 0v237h61v65h352', 'M265 0v74h75v300h160', 'M278 0v60h75v300h147', 'M0 410h177v-42h72v142', 'M0 423h190v-42h46v129', 'M384 0v442h-40v68', 'M397 0v455h-40v55']) {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', line); svg.append(path);
+  }
+  return svg;
+}
+function hardwareMap(components) {
+  const selected = state.hardwareSelected;
+  return el('section', { class: 'panel hardware-map', 'aria-labelledby': 'hardware-map-title' },
+    el('div', { class: 'hardware-map-header' }, el('div', {}, el('p', { class: 'hardware-kicker' }, 'The component map'), el('h2', { id: 'hardware-map-title' }, 'Every part has a story')), el('span', { class: 'hardware-map-caption' }, 'Select a component')),
+    el('div', { class: 'hardware-board', role: 'group', 'aria-label': 'Illustrative computer components. Select a component to inspect its readings.' },
+      hardwareCircuit(),
+      el('span', { class: 'hardware-board-label', 'aria-hidden': 'true' }, 'JARVIS / SYSTEM EXPLORER'),
+      el('div', { class: 'hardware-components' }, components.map(component => el('button', {
+        type: 'button', id: `hardware-part-${component.id}`, class: `hardware-part part-${component.id}${selected === component.id ? ' selected' : ''}`,
+        'data-status': component.status, 'aria-pressed': String(selected === component.id), 'aria-controls': 'hardware-inspector',
+        'aria-label': `${component.title}: ${HARDWARE_STATUS[component.status].label}. Show details.`, onClick: () => selectHardwareComponent(component.id),
+      }, el('span', { class: 'hardware-part-art', 'aria-hidden': 'true' }, icon(component.icon)),
+      el('span', { class: 'hardware-part-copy' }, el('strong', {}, component.mapTitle), el('span', { class: 'hardware-part-state' }, el('span', { class: 'hardware-dot', 'aria-hidden': 'true' }), component.status === 'ok' ? 'No alerts' : component.status === 'warning' ? 'Attention' : component.status === 'critical' ? 'Urgent' : component.status === 'absent' ? 'Not detected' : 'Unknown')),
+      el('span', { class: 'hardware-part-code', 'aria-hidden': 'true' }, component.short)))),
+      el('div', { class: 'hardware-board-screws', 'aria-hidden': 'true' }, el('i'), el('i'), el('i'), el('i'))),
+    el('p', { class: 'hardware-map-note' }, icon('info'), 'Illustrative layout. Component positions may differ from your computer.'));
+}
+function hardwareReadings(items, className = '') {
+  return el('dl', { class: `hardware-readings ${className}`.trim() }, items.map(item => el('div', {}, el('dt', {}, hardwareText(item.label, 'Reading')), el('dd', {}, hardwareText(item.value), item.note ? el('p', {}, hardwareText(item.note, '')) : null))));
+}
+function hardwareFinding(finding, component, link = false) {
+  const severity = ['warning', 'critical'].includes(finding.severity) ? finding.severity : 'info';
+  return el('article', { class: `hardware-finding is-${severity}` },
+    el('span', { class: 'hardware-finding-icon' }, icon(severity === 'info' ? 'info' : 'alert')),
+    el('div', {}, el('div', { class: 'hardware-finding-heading' }, el('h3', {}, hardwareText(finding.title, 'Reading to review')), link ? badge(component.title) : null),
+      finding.explanation ? el('p', {}, hardwareText(finding.explanation, '')) : null,
+      finding.recommendation ? el('p', { class: 'hardware-recommendation' }, el('strong', {}, 'Next step. '), hardwareText(finding.recommendation, '')) : null,
+      link ? textButton('Inspect component', () => selectHardwareComponent(component.id, { focusDetails: true })) : null));
+}
+function hardwareInspector(component) {
+  const number = HARDWARE_PARTS.findIndex(part => part.id === component.id) + 1;
+  const devices = component.devices;
+  const actions = component.actions.filter(action => NAV.some(item => item.id === action.screen && item.id !== 'hardware'));
+  return el('section', { class: 'panel hardware-inspector', id: 'hardware-inspector', 'aria-labelledby': 'hardware-component-title' },
+    el('header', { class: 'hardware-inspector-header' },
+      el('div', { class: 'hardware-inspector-top' }, el('span', { class: 'hardware-inspector-icon' }, icon(component.icon)), el('p', { class: 'hardware-kicker' }, `Component ${String(number).padStart(2, '0')} / ${HARDWARE_PARTS.length}`), hardwareBadge(component.status)),
+      el('h2', { id: 'hardware-component-title', tabindex: '-1' }, component.title), el('p', { class: 'hardware-component-summary' }, component.summary)),
+    component.metrics.length ? el('section', { class: 'hardware-inspector-section', 'aria-label': 'Component readings' }, hardwareReadings(component.metrics, 'hardware-metrics')) : null,
+    component.findings.length ? el('section', { class: 'hardware-inspector-section' }, el('h3', { class: 'hardware-section-title' }, 'What this means'), component.findings.map(finding => hardwareFinding(finding, component))) : null,
+    component.details.length ? el('section', { class: 'hardware-inspector-section' }, el('h3', { class: 'hardware-section-title' }, 'Technical details'), hardwareReadings(component.details)) : null,
+    el('section', { class: 'hardware-inspector-section' }, el('div', { class: 'hardware-section-heading' }, el('h3', { class: 'hardware-section-title' }, component.id === 'battery' ? 'Device & provider records' : 'Detected devices'), el('span', { class: 'hardware-device-count' }, devices.length)),
+      devices.length ? el('div', { class: 'hardware-devices' }, devices.map(device => el('details', { class: 'hardware-device', open: devices.length === 1 },
+        el('summary', {}, el('span', { class: 'hardware-device-icon' }, icon(component.icon)), el('span', {}, hardwareText(device.name, 'Unnamed device')), icon('chevron')),
+        el('div', { class: 'hardware-device-body' }, device.status ? el('p', { class: 'hardware-device-status' }, el('strong', {}, 'Reported status: '), Object.hasOwn(HARDWARE_STATUS, device.status) ? HARDWARE_STATUS[device.status].label : hardwareText(device.status)) : null,
+          hardwareItems(device.details).length ? hardwareReadings(hardwareItems(device.details)) : el('p', { class: 'subtle' }, 'No further device details were reported.'))))) : el('p', { class: 'hardware-empty-copy' }, 'No device inventory was returned for this component. This does not confirm a physical fault.')),
+    el('section', { class: 'hardware-inspector-section hardware-limitations' }, el('h3', { class: 'hardware-section-title' }, icon('info'), 'What this reading can tell you'),
+      el('ul', {}, (component.limitations.length ? component.limitations : ['Available readings describe what the operating system reports. They cannot rule out a physical fault.']).map(item => el('li', {}, item)))),
+    actions.length ? el('footer', { class: 'hardware-inspector-actions' }, el('p', {}, 'Continue with a tool'), el('div', {}, actions.map(action => button(hardwareText(action.label, 'Open tool'), 'arrow', () => navigate(action.screen), 'small')))) : null);
+}
+function renderHardware() {
+  const snapshot = state.hardware;
+  const head = heading('Inside your PC', 'Get to know your hardware. Follow the readings, understand the signals, and find your next step.',
+    [button(state.loading ? 'Reading hardware...' : 'Refresh readings', 'refresh', handle(refreshHardware), 'primary', { id: 'hardware-refresh', disabled: state.loading })], 'Your computer, explained');
+  if (!snapshot) {
+    setPage(head, state.hardwareError ? notice(state.hardwareError, 'error') : null, el('div', { class: 'panel' }, empty('Hardware readings are unavailable', 'Keep Jarvis running, then refresh to request a read-only hardware snapshot.', 'motherboard')));
+    return;
+  }
+  const components = normalizeHardwareComponents(snapshot);
+  const component = components.find(item => item.id === state.hardwareSelected) || components[0];
+  state.hardwareSelected = component.id;
+  const attention = components.filter(item => ['warning', 'critical'].includes(item.status));
+  const unknown = components.filter(item => item.status === 'unknown');
+  const absent = components.filter(item => item.status === 'absent');
+  const observed = components.filter(item => ['ok', 'warning', 'critical'].includes(item.status));
+  const findings = components.flatMap(item => item.findings.filter(finding => ['warning', 'critical'].includes(finding.severity)).map(finding => ({ component: item, finding }))).sort((left, right) => Number(right.finding.severity === 'critical') - Number(left.finding.severity === 'critical'));
+  const summaryItem = (value, title, description, tone, name) => el('div', { class: `hardware-summary-item ${tone}` }, el('span', { class: 'hardware-summary-icon' }, icon(name)), el('div', {}, el('span', { class: 'hardware-summary-number' }, value), el('strong', {}, title), el('p', {}, description)));
+  const sampled = new Date(snapshot.sampledAt || '');
+  const hasTime = Number.isFinite(sampled.getTime());
+  const limitations = Array.isArray(snapshot.limitations) ? snapshot.limitations.filter(item => typeof item === 'string' && item.trim()) : [];
+  setPage(head,
+    snapshot.demo ? notice('Demo hardware: these are illustrative readings, not a scan of this computer.', 'warning') : null,
+    state.hardwareError ? notice(`Refresh failed. Showing the last successful sample. ${state.hardwareError}`, 'error') : null,
+    el('div', { class: 'hardware-sample-bar' }, el('span', {}, icon('shield'), 'Read-only snapshot'), el('span', {}, icon('clock'), state.loading ? 'Refreshing: previous readings remain visible' : 'Sampled ', state.loading ? null : el('time', { datetime: hasTime ? sampled.toISOString() : null }, hasTime ? sampled.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'at an unknown time')), el('span', { class: 'hardware-cache-note' }, 'Recent readings may be reused for 15 seconds.'), el('span', { class: 'hardware-platform' }, ({ win32: 'Windows', linux: 'Linux', darwin: 'macOS' })[snapshot.platform] || hardwareText(snapshot.platform, 'Local computer'))),
+    el('div', { class: 'hardware-summary', 'aria-label': 'Hardware reporting coverage' },
+      summaryItem(observed.length, 'With health observations', 'A reported status is not a full health test.', 'observed', 'activity'),
+      summaryItem(attention.length, 'Need attention', attention.length ? 'Review the reported signals below.' : 'No alerts in the readings available.', attention.length ? 'attention' : 'clear', attention.length ? 'alert' : 'check'),
+      summaryItem(unknown.length, 'Health unknown', absent.length ? `${absent.length} additional component${absent.length === 1 ? '' : 's'} not detected.` : 'Missing sensors are never marked healthy.', 'unknown', 'info')),
+    el('div', { class: 'hardware-workspace', 'aria-busy': String(state.loading) },
+      el('div', { class: 'hardware-map-column' }, hardwareMap(components),
+        el('section', { class: 'panel hardware-attention', 'aria-labelledby': 'hardware-attention-title' }, el('div', { class: 'hardware-section-heading' }, el('h2', { id: 'hardware-attention-title' }, 'Worth a closer look'), badge(`${findings.length} signal${findings.length === 1 ? '' : 's'}`, findings.length ? 'warn' : '')),
+          findings.length ? findings.map(item => hardwareFinding(item.finding, item.component, true)) : el('p', { class: 'hardware-empty-copy' }, unknown.length ? 'No warning signals were returned. Some components have no supported health reading; inspect the unknown components to see what is missing.' : 'No warning signals were returned in this sample. This does not rule out hardware faults.'))),
+      hardwareInspector(component)),
+    el('details', { class: 'panel hardware-method' }, el('summary', {}, icon('shield'), el('span', {}, 'How to read this view'), el('span', { class: 'hardware-method-caption' }, 'Sources, coverage & limitations'), icon('chevron')),
+      el('div', {}, el('p', {}, el('strong', {}, 'Not a physical inspection. '), 'This view uses operating system reports and available hardware interfaces. It cannot see damage to a socket, cable, battery, or motherboard. A component with no alerts can still have a fault.'),
+        el('p', {}, 'Readings are sampled on entry and when you choose Refresh readings. They do not update continuously; samples collected in the last 15 seconds may be reused. Health unknown means a supported health reading was unavailable; Not detected describes this sample, not proof that a component is missing.'),
+        limitations.length ? el('ul', {}, limitations.map(item => el('li', {}, item))) : null)));
 }
 
 function searchField(placeholder, value, onInput, label = placeholder) {
@@ -447,7 +644,7 @@ async function openPreview(path, line = null) {
 }
 
 function renderSearch() {
-  const query = el('input', { type: 'search', placeholder: 'A word, a phrase, a little clue…', value: state.search.q, 'aria-label': 'Search project contents', required: true });
+  const query = el('input', { type: 'search', placeholder: 'Search for a word, phrase, or error message…', value: state.search.q, 'aria-label': 'Search project contents', required: true });
   const regex = el('input', { type: 'checkbox', checked: state.search.regex, onChange: event => { state.search.regex = event.target.checked; } });
   const caseSensitive = el('input', { type: 'checkbox', checked: state.search.caseSensitive, onChange: event => { state.search.caseSensitive = event.target.checked; } });
   const glob = el('input', { type: 'text', placeholder: 'e.g. *.js', value: state.search.glob, 'aria-label': 'Filename pattern', onInput: event => { state.search.glob = event.target.value; } });
@@ -517,7 +714,7 @@ async function reviewGit(action) {
   if (action === 'commit') {
     body.append(notice('This stages and commits all changed files in the whole repository, including deletions and non-ignored new files. Saving is local; upload is separate.', 'warning'), el('ul', { class: 'review-list' }, (git.changes || []).map(item => el('li', {}, `${item.kind} · ${item.path}`))));
     message = el('textarea', { placeholder: 'Describe what changed…', 'aria-label': 'Commit message', required: true });
-    body.append(el('div', { class: 'form-field' }, el('label', {}, 'Snapshot message'), message));
+    body.append(formField('Snapshot message', message));
   } else body.append(el('p', {}, action === 'push' ? 'Only saved commits are uploaded. This uses your existing Git credentials and never force-pushes.' : 'This uses a fast-forward-only pull and requires a clean working tree. Divergent histories stop for your review.'));
   openModal(title, body, { confirmText: action === 'commit' ? 'Save snapshot' : action === 'push' ? 'Upload commits' : 'Download updates', onConfirm: async () => {
     if (message && !message.value.trim()) { message.focus(); throw new Error('Add a short message describing this snapshot.'); }
@@ -573,7 +770,7 @@ function formField(label, input, hint = '') {
   return el('div', { class: 'form-field' }, el('label', { for: id }, label), input, hint ? el('p', { class: 'field-hint' }, hint) : null);
 }
 formField.sequence = 0;
-function values(value) { return Array.isArray(value) ? value.map(item => typeof item === 'object' ? item.address || item.ipAddress || item.name || '' : item).filter(Boolean).join(', ') || '—' : value || '—'; }
+function values(value) { return Array.isArray(value) ? value.map(item => item && typeof item === 'object' ? item.address || item.ipAddress || item.name || '' : item).filter(item => typeof item === 'string' || typeof item === 'number').join(', ') || '—' : typeof value === 'string' || typeof value === 'number' ? String(value) : '—'; }
 async function openSystemSetting(id) {
   const result = await api('/api/settings/open', { method: 'POST', body: { id, confirmed: true } });
   toast(result.message || 'Opened Windows settings.');
@@ -726,11 +923,11 @@ function renderPorts() {
   const fill = () => {
     const items = data.ports.filter(item => `${item.port} ${item.pid} ${item.address} ${item.process || ''} ${item.protocol}`.toLowerCase().includes(state.portFilter.toLowerCase()));
     rows.replaceChildren(...items.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('network'), el('strong', {}, item.port))), el('td', {}, badge(item.protocol)), el('td', { class: 'mono' }, item.address), el('td', { class: 'mono' }, item.pid ?? 'Hidden'), el('td', {}, item.process || '—'))));
-    if (!items.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty('No matching listeners', state.portFilter ? 'Try a different port, process ID, or address.' : 'No listeners were reported by the system.', 'network', null, true))));
+    if (!items.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty('No matching listeners', state.portFilter ? 'Try a different port, process name, process ID, or address.' : 'No listeners were reported by the system.', 'network', null, true))));
     summary.textContent = `${number(items.length)} local endpoints`;
   }; fill();
-  setPage(heading('Ports & connections', 'Find what is using a port before starting your next server.', [button('Refresh', 'refresh', () => navigate('ports'))], 'Ports & connections'), data.warning ? notice(data.warning, 'warning') : null,
-    el('div', { class: 'toolbar' }, searchField('Search port, PID, or address…', state.portFilter, value => { state.portFilter = value; fill(); }), badge('LOCAL ENDPOINTS', '', 'shield')),
+  setPage(heading('Ports & connections', 'See which apps are listening for network connections, and find the process using a port.', [button('Refresh', 'refresh', () => navigate('ports'))], 'Ports & connections'), data.warning ? notice(data.warning, 'warning') : null,
+    el('div', { class: 'toolbar' }, searchField('Search port, process, PID, or address…', state.portFilter, value => { state.portFilter = value; fill(); }), badge('LOCAL ENDPOINTS', '', 'shield')),
     el('section', { class: 'panel' }, el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Port', 'Protocol', 'Address', 'PID', 'Process'].map(value => el('th', {}, value)))), rows)), el('div', { class: 'table-end' }, summary, el('span', {}, 'TCP listeners + bound UDP sockets'))), el('p', { class: 'muted-caption' }, 'A listening port is not necessarily reachable from the internet. Process details depend on your operating-system permissions.'));
 }
 
@@ -747,11 +944,21 @@ function reviewScript(script) {
 function renderStorage() {
   const data = state.storage;
   const options = data.locations.map(location => el('option', { value: location.path, selected: location.path === data.path }, `${location.label || basename(location.path)}${location.path ? ` · ${location.path}` : ''}`));
-  const pathInput = el('input', { type: 'text', value: data.path, placeholder: 'Choose a folder or drive…', 'aria-label': 'Folder or drive to scan', onInput: event => { data.path = event.target.value; } });
-  const select = el('select', { 'aria-label': 'Common storage locations', onChange: event => { data.path = event.target.value; pathInput.value = event.target.value; } }, el('option', { value: '', disabled: true, selected: !data.locations.some(location => location.path === data.path) }, 'Choose a location'), options);
-  const scope = el('section', { class: 'panel' }, el('form', { class: 'storage-select', onSubmit: event => { event.preventDefault(); void startScan().catch(report); } }, el('div', { class: 'form-field storage-location' }, el('label', {}, 'Start somewhere'), select), el('div', { class: 'form-field storage-path' }, el('label', {}, 'Folder or drive'), pathInput), button('Analyze storage', 'search', null, 'primary', { type: 'submit', disabled: !!state.activeJob })), el('div', { class: 'storage-scan-hint' }, icon('shield'), 'Scanning only reads files. Nothing moves or gets deleted.'));
-  const content = el('div');
-  const tabs = el('div', { class: 'storage-tabs', role: 'tablist', 'aria-label': 'Storage sections' }, [['overview', 'Storage map'], ['cleanup', 'Review cleanup'], ['recovery', 'Recovery']].map(([id, label]) => el('button', { type: 'button', role: 'tab', 'aria-selected': data.tab === id, class: `storage-tab${data.tab === id ? ' active' : ''}`, onClick: () => { data.tab = id; renderStorage(); } }, label, id === 'cleanup' && data.scan?.cleanupCandidates?.length ? ` (${data.scan.cleanupCandidates.length})` : '')));
+  const pathInput = el('input', { id: 'storage-scan-path', type: 'text', value: data.path, placeholder: 'Choose a folder or drive…', 'aria-label': 'Folder or drive to scan', onInput: event => { data.path = event.target.value; } });
+  const select = el('select', { id: 'storage-scan-location', 'aria-label': 'Common storage locations', onChange: event => { data.path = event.target.value; pathInput.value = event.target.value; } }, el('option', { value: '', disabled: true, selected: !data.locations.some(location => location.path === data.path) }, 'Choose a location'), options);
+  const scope = el('section', { class: 'panel' }, el('form', { class: 'storage-select', onSubmit: event => { event.preventDefault(); void startScan().catch(report); } }, el('div', { class: 'form-field storage-location' }, el('label', { for: 'storage-scan-location' }, 'Choose a location'), select), el('div', { class: 'form-field storage-path' }, el('label', { for: 'storage-scan-path' }, 'Folder or drive'), pathInput), button('Analyze storage', 'search', null, 'primary', { type: 'submit', disabled: !!state.activeJob })), el('div', { class: 'storage-scan-hint' }, icon('shield'), 'Scanning only reads files. Nothing moves or gets deleted.'));
+  const content = el('div', { id: 'storage-tab-panel', role: 'tabpanel', 'aria-labelledby': `storage-tab-${data.tab}`, tabindex: 0 });
+  const sections = [['overview', 'Storage map'], ['cleanup', 'Review cleanup'], ['recovery', 'Recovery']];
+  const selectTab = id => { data.tab = id; renderStorage(); $(`#storage-tab-${id}`)?.focus({ preventScroll: true }); };
+  const tabs = el('div', { class: 'storage-tabs', role: 'tablist', 'aria-label': 'Storage sections' }, sections.map(([id, label], index) => el('button', {
+    type: 'button', role: 'tab', id: `storage-tab-${id}`, 'aria-controls': 'storage-tab-panel', 'aria-selected': String(data.tab === id), tabindex: data.tab === id ? 0 : -1,
+    class: `storage-tab${data.tab === id ? ' active' : ''}`, onClick: () => selectTab(id), onKeydown: event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? sections.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + sections.length) % sections.length;
+      selectTab(sections[next][0]);
+    },
+  }, label, id === 'cleanup' && data.scan?.cleanupCandidates?.length ? ` (${data.scan.cleanupCandidates.length})` : '')));
   if (data.tab === 'recovery') content.append(renderRecovery());
   else if (!data.scan) content.append(el('section', { class: 'panel' }, empty('Analyze a folder or drive', 'Choose your workspace, a folder, or a drive. We’ll map file sizes and identify eligible old temporary files for your review.', 'drive')));
   else if (data.tab === 'cleanup') content.append(renderCleanup());
@@ -781,7 +988,7 @@ function renderStorageMap() {
   overview.append(el('div', { class: 'panel-footer' }, `${number(data.totalFiles)} files · ${number(data.totalDirectories || 0)} folders`, `${duration(Number(data.elapsedMs || 0) / 1000)} elapsed`));
   const candidates = data.cleanupCandidates || [];
   const candidateBytes = candidates.reduce((sum, item) => sum + Number(item.size ?? item.bytes ?? 0), 0);
-  const cleanup = panel('A little breathing room', 'Only eligible old temporary files are suggested.', el('div', {}, el('div', { class: 'stat-inline' }, el('div', {}, el('strong', {}, bytes(candidateBytes)), el('small', {}, 'Candidates to review')), el('div', {}, el('strong', {}, number(candidates.length)), el('small', {}, 'Temporary files'))), el('p', { class: 'muted-caption' }, 'Review the exact files first. Moving files to recovery is reversible and does not free disk space until you permanently delete them.'), button('Review cleanup', 'leaf', () => { state.storage.tab = 'cleanup'; renderStorage(); }, 'soft section-space', { disabled: !candidates.length })));
+  const cleanup = panel('Cleanup candidates', 'Only eligible old temporary files are suggested.', el('div', {}, el('div', { class: 'stat-inline' }, el('div', {}, el('strong', {}, bytes(candidateBytes)), el('small', {}, 'Candidates to review')), el('div', {}, el('strong', {}, number(candidates.length)), el('small', {}, 'Temporary files'))), el('p', { class: 'muted-caption' }, 'Review the exact files first. Moving files to recovery is reversible and does not free disk space until you permanently delete them.'), button('Review cleanup', 'leaf', () => { state.storage.tab = 'cleanup'; renderStorage(); }, 'soft section-space', { disabled: !candidates.length })));
   const largest = (data.largestFiles || []).slice(0, 30);
   const largestTable = largest.length ? table(['Largest files', 'File size', 'Modified'], largest.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('file'), el('span', { title: item.path }, item.path || item.name))), el('td', { class: 'nowrap' }, bytes(item.size ?? item.bytes)), el('td', { class: 'nowrap' }, timestamp(item.modified || item.mtime)))), 'Large does not mean disposable. These files are shown for inspection only.') : el('section', { class: 'panel' }, empty('No regular files were measured', 'Choose another folder or inspect the scan’s access limits.', 'folder', null, true));
   return el('div', {}, data.cancelled || data.truncated || data.skipped ? notice(`${data.cancelled ? 'This scan was cancelled. Totals cover only the files measured before it stopped. ' : data.truncated ? 'This scan reached its time or entry limit. Totals are partial. ' : ''}${number(data.skipped || 0)} items were skipped. Permissions, symlinks, and changing files can limit a scan.`, 'warning') : null, el('div', { class: 'storage-summary-grid' }, overview, cleanup), el('div', { class: 'section-caption' }, el('h2', {}, 'Largest files in this scan'), badge('READ ONLY')), largestTable);
@@ -849,7 +1056,7 @@ function reviewRecovery(item, action) {
   if (action === 'purge') {
     body.prepend(notice('Permanent deletion cannot be undone. These recovery copies will be removed from disk.', 'error', 'alert'));
     phrase = el('input', { type: 'text', placeholder: 'Type DELETE', autocomplete: 'off', 'aria-label': 'Type DELETE to confirm permanent deletion' });
-    body.append(el('div', { class: 'form-field' }, el('label', {}, 'Type DELETE to confirm'), phrase));
+    body.append(formField('Type DELETE to confirm', phrase));
   } else if (action === 'restore') body.prepend(notice('Files will return to their original locations. Existing files are not overwritten; any conflicts will be reported.'));
   openModal(action === 'purge' ? 'Permanently delete this batch?' : action === 'restore' ? 'Restore these files?' : 'Recovery batch details', body, {
     confirmText: action === 'details' ? null : action === 'purge' ? 'Delete permanently' : 'Restore files', danger: action === 'purge', onConfirm: async () => {
@@ -863,9 +1070,9 @@ function renderActivity() {
   const records = Array.isArray(state.activity) ? state.activity : [];
   const content = el('div'); const filters = el('div', { class: 'activity-filters' });
   const fill = status => {
-    filters.replaceChildren(...[['all', 'All activity'], ['completed', 'Completed'], ['failed', 'Needs attention']].map(([key, label]) => el('button', { type: 'button', class: `filter-chip${status === key ? ' active' : ''}`, onClick: () => fill(key) }, label)));
+    filters.replaceChildren(...[['all', 'All activity'], ['completed', 'Completed'], ['failed', 'Needs attention']].map(([key, label]) => el('button', { type: 'button', class: `filter-chip${status === key ? ' active' : ''}`, 'aria-pressed': String(status === key), onClick: () => fill(key) }, label)));
     const items = records.filter(item => status === 'all' || (status === 'completed' ? ['completed', 'success', 'succeeded'].includes(item.status) : ['failed', 'error', 'cancelled'].includes(item.status)));
-    content.replaceChildren(items.length ? table(['Action', 'Result', 'When', ''], items.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('activity'), actionLabel(item.action)), el('p', { class: 'candidate-reason', title: item.target || '' }, item.message || item.target || '')), el('td', {}, badge(actionLabel(item.status || 'Recorded'), activityTone(item.status))), el('td', { class: 'nowrap' }, timestamp(item.time)), el('td', { class: 'right' }, iconButton('search', 'View activity details', () => openModal('Activity details', el('div', { class: 'review-details' }, definition([['Action', item.action], ['Status', item.status], ['When', timestamp(item.time)], ['Target', item.target], ['Message', item.message]]))))))), `${number(items.length)} recorded actions`) : el('section', { class: 'panel' }, empty('A clear record starts here.', 'Your scans, Git actions, and project tasks will appear here as you use Jarvis.', 'activity')));
+    content.replaceChildren(items.length ? table(['Action', 'Result', 'When', ''], items.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('activity'), actionLabel(item.action)), el('p', { class: 'candidate-reason', title: item.target || '' }, item.message || item.target || '')), el('td', {}, badge(actionLabel(item.status || 'Recorded'), activityTone(item.status))), el('td', { class: 'nowrap' }, timestamp(item.time)), el('td', { class: 'right' }, iconButton('search', 'View activity details', () => openModal('Activity details', el('div', { class: 'review-details' }, definition([['Action', item.action], ['Status', item.status], ['When', timestamp(item.time)], ['Target', item.target], ['Message', item.message]]))))))), `${number(items.length)} recorded actions`) : el('section', { class: 'panel' }, empty('No activity to show', 'Scans, Git actions, and project tasks appear here. Choose another filter to see more of your history.', 'activity')));
   };
   fill('all');
   setPage(heading('Activity log', 'See what ran, what changed, and what needs another look.', [button('Refresh', 'refresh', () => navigate('activity'))], 'Activity'), filters, content);
@@ -922,9 +1129,11 @@ function openPalette() {
   fill(''); modal.showModal(); input.focus();
 }
 async function openToolbox(category = '') {
+  // A click event is not a recipe category. Keep event objects out of visible text.
+  category = typeof category === 'string' ? category.trim() : '';
   if (!state.recipes.length) state.recipes = await api('/api/recipes');
   const recipes = category ? state.recipes.filter(recipe => recipe.category === category) : state.recipes;
-  const content = el('div', { class: 'recipe-grid' }, recipes.map(recipe => el('button', { type: 'button', class: 'recipe-card', onClick: () => showRecipe(recipe) }, el('small', {}, recipe.category), el('h3', {}, recipe.title), el('p', {}, recipe.description))));
+  const content = recipes.length ? el('div', { class: 'recipe-grid' }, recipes.map(recipe => el('button', { type: 'button', class: 'recipe-card', onClick: () => showRecipe(recipe) }, el('small', {}, recipe.category), el('h3', {}, recipe.title), el('p', {}, recipe.description)))) : empty('No reference guides here yet', 'Use the tool finder to open files, search, storage, and other workspace tools.', 'sparkles');
   openModal(category ? `${category} made simpler` : 'Command reference', content, { subtitle: 'Practical recipes, useful tools, and a little less guesswork.', wide: true });
 }
 function showRecipe(recipe) {
@@ -1119,7 +1328,7 @@ async function init() {
     if (event.key === 'Escape' && !modal.open && state.activeJob) { event.preventDefault(); void cancelJob().catch(report); }
     const typing = event.target.matches('input, textarea, select, [contenteditable="true"]');
     if (typing || modal.open || event.ctrlKey || event.metaKey || event.altKey) return;
-    if (/^[1-9]$/.test(event.key)) { event.preventDefault(); void navigate(NAV[Number(event.key) - 1].id); }
+    if (/^[1-9]$/.test(event.key)) { event.preventDefault(); void navigate(NAV.filter(item => item.id !== 'hardware')[Number(event.key) - 1].id); }
     else if (event.key === '/') { event.preventDefault(); page.querySelector('input[type="search"]')?.focus(); }
     else if (event.key === '?') { event.preventDefault(); void openToolbox().catch(report); }
   });

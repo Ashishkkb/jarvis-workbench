@@ -101,9 +101,9 @@ async function browserFixture(respond = () => { throw new Error("Unexpected requ
     token = 'test-token';
     modal.addEventListener('close', onModalClose);
     globalThis.testClient = { api, launchJob, recoverJobs, savedJob, el, setPage, openPalette, screen: () => state.screen,
-      state, navigateActual, renderProcesses, reviewProcessStop, pollJob, jobWarnings, renderJobDock, fillJobModal,
+      state, navigateActual, renderOverview, openToolbox, bytes, number, values, renderProcesses, reviewProcessStop, pollJob, jobWarnings, renderJobDock, fillJobModal,
       renderNetwork, renderAudio, renderSecurity, renderSettings, reviewWifiPassword, reviewDns,
-      reviewSecurityScan, customSecurityScan, openAbout, openModal, fileActions, editFileAction, reviewFileAction, fileRecovery, renderFiles, renderStorageMap };
+      reviewSecurityScan, customSecurityScan, openAbout, openModal, fileActions, editFileAction, reviewFileAction, fileRecovery, renderFiles, renderStorage, renderStorageMap, renderHardware, normalizeHardwareComponents, selectHardwareComponent, refreshHardware };
 
   `, context);
   return { document, requests, headers, sessionStorage, client: context.testClient, modal: document.querySelector('#modal'), page: document.querySelector('#page') };
@@ -486,4 +486,163 @@ test('cancelled storage results explain cancellation instead of inventing a time
   const text = client.renderStorageMap().textContent;
   assert.match(text, /scan was cancelled/);
   assert.doesNotMatch(text, /reached its time or entry limit/);
+});
+
+
+function hardwareSample() {
+  return { sampledAt: '2026-10-12T12:00:00.000Z', platform: 'win32', demo: false, summary: { attention: 1, observed: 2, unknown: 7 }, limitations: ['Firmware cannot expose every sensor.'], components: [
+    { id: 'cpu', title: 'Processor', status: 'ok', summary: 'CPU load is a sample.', metrics: [{ label: 'Load', value: '0%' }], details: [], devices: [], findings: [], actions: [] },
+    { id: 'memory', title: 'Memory', status: 'warning', summary: 'Memory pressure detected.', metrics: [{ label: 'Used', value: '95%' }], details: [{ label: 'Slots', value: null }],
+      devices: [{ name: '<script>device()</script>', status: 'OK', details: [{ label: 'Capacity', value: '16 GiB' }] }],
+      findings: [{ severity: 'warning', title: 'Low free memory', explanation: 'Less memory is available.', recommendation: 'Inspect running programs.' }], limitations: ['Not a RAM integrity test.'], actions: [{ label: 'Inspect processes', screen: 'processes' }] },
+    { id: 'cooling', title: 'Cooling', status: 'unknown', summary: 'No thermal sensor was reported.', metrics: [{ label: 'Temperature', value: null }], details: [], devices: [], findings: [], actions: [] },
+  ] };
+}
+function descendants(node) { return [node, ...node.children.flatMap(descendants)]; }
+
+test('hardware map preserves zero readings, marks missing components unknown and keeps device text inert', async () => {
+  const { client, page } = await browserFixture();
+  client.state.hardware = hardwareSample();
+  client.renderHardware();
+  const parts = descendants(page).filter(node => node.getAttribute('id')?.startsWith('hardware-part-'));
+  assert.equal(parts.length, 9);
+  assert.equal(parts.find(node => node.getAttribute('id') === 'hardware-part-cpu').getAttribute('aria-pressed'), 'true');
+  assert.equal(parts.find(node => node.getAttribute('id') === 'hardware-part-motherboard').getAttribute('data-status'), 'unknown');
+  assert.match(page.textContent, /Load0%/);
+  client.selectHardwareComponent('cooling');
+  assert.match(page.textContent, /TemperatureUnknown/);
+  assert.doesNotMatch(page.textContent, /0 degrees|0 C|undefined|\[object Object\]/);
+  client.selectHardwareComponent('memory');
+  assert.match(page.textContent, /SlotsUnknown/);
+  assert.match(page.textContent, /Low free memory/);
+  assert.match(page.textContent, /Inspect running programs/);
+  assert.match(page.textContent, /16 GiB/);
+  assert.match(page.textContent, /<script>device\(\)<\/script>/);
+  assert.equal(descendants(page).filter(node => node.tagName === 'SCRIPT').length, 0);
+  await clickButton(findButton(page, 'Inspect processes'));
+  assert.equal(client.state.screen, 'processes');
+});
+
+test('hardware findings open their component and unsupported component IDs are ignored', async () => {
+  const { client, page } = await browserFixture();
+  client.state.hardware = hardwareSample();
+  client.renderHardware();
+  await clickButton(findButton(page, 'Inspect component'));
+  assert.equal(client.state.hardwareSelected, 'memory');
+  client.selectHardwareComponent('__proto__');
+  assert.equal(client.state.hardwareSelected, 'memory');
+  assert.match(page.textContent, /Not a RAM integrity test/);
+});
+
+test('hardware refresh failure retains last sample and releases loading controls', async () => {
+  const { client, page } = await browserFixture(() => ({ status: 503, body: { error: 'Provider unavailable' } }));
+  client.state.root = 'fixture';
+  client.state.hardware = hardwareSample();
+  client.state.hardwareSelected = 'memory';
+  const timestamp = client.state.hardware.sampledAt;
+  await client.navigateActual('hardware', { quiet: true });
+  assert.equal(client.state.loading, false);
+  assert.equal(client.state.hardware.sampledAt, timestamp);
+  assert.equal(client.state.hardwareSelected, 'memory');
+  assert.match(page.textContent, /Refresh failed. Showing the last successful sample/);
+  assert.match(page.textContent, /Provider unavailable/);
+  assert.notEqual(findButton(page, 'Refresh readings').disabled, true);
+});
+
+test('hardware initial failure is actionable and never displays fabricated observations', async () => {
+  const { client, page } = await browserFixture(() => ({ status: 503, body: { error: 'No readings' } }));
+  client.state.root = 'fixture';
+  await client.navigateActual('hardware');
+  assert.equal(client.state.loading, false);
+  assert.match(page.textContent, /Hardware readings are unavailable/);
+  assert.ok(findButton(page, 'Refresh readings'));
+  assert.equal(descendants(page).filter(node => node.getAttribute('id')?.startsWith('hardware-part-')).length, 0);
+});
+
+test('late hardware response cannot overwrite another view or its retained sample', async () => {
+  let resolveHardware;
+  const { client, page } = await browserFixture(request => request.url === '/api/hardware'
+    ? new Promise(resolve => { resolveHardware = resolve; }) : { body: { ports: [] } });
+  client.state.root = 'fixture';
+  const pending = client.navigateActual('hardware');
+  assert.match(page.textContent, /35 seconds/);
+  await client.navigateActual('ports');
+  const otherView = page.textContent;
+  resolveHardware({ body: hardwareSample() });
+  await pending;
+  assert.equal(client.state.screen, 'ports');
+  assert.equal(client.state.hardware, null);
+  assert.equal(page.textContent, otherView);
+  assert.equal(client.state.loading, false);
+});
+
+
+test('dashboard missing measurements remain unknown instead of showing zero memory or CPU counts', async () => {
+  const { client, page, requests } = await browserFixture();
+  client.state.root = 'D:/sample-project';
+  client.state.overview = { system: { platform: 'win32', memoryTotal: null, memoryFree: null, cpus: null }, demo: false };
+  client.state.git = { isRepo: false };
+  client.renderOverview();
+  assert.match(page.textContent, /sample-project/);
+  assert.match(page.textContent, /NOT REPORTED/);
+  assert.match(page.textContent, /Not reported by this computer/);
+  assert.doesNotMatch(page.textContent, /0%MEMORY IN USE|0 logical processors|undefined|\[object Object\]/);
+  assert.equal(requests.length, 0);
+  for (const value of [null, undefined, '', ' ', true, false, {}, []]) {
+    assert.equal(client.bytes(value), '—');
+    assert.equal(client.number(value), '—');
+  }
+  assert.equal(client.bytes(0), '0 B');
+  assert.equal(client.bytes(1024), '1 KB');
+  assert.equal(client.number(0), '0');
+  assert.equal(client.values([null, undefined, { address: '192.0.2.1' }, { name: 'Wi-Fi' }]), '192.0.2.1, Wi-Fi');
+});
+
+test('overview quick actions keep all six destinations reachable without extra requests', async () => {
+  const { client, page, requests } = await browserFixture();
+  client.state.root = 'D:/project';
+  client.state.overview = { system: { platform: 'win32', memoryTotal: 1024, memoryFree: 512, cpus: 4, uptime: 300 } };
+  client.state.git = { isRepo: false };
+  client.renderOverview();
+  const byLabel = (node, label) => node.getAttribute('aria-label') === label ? node : node.children.map(child => byLabel(child, label)).find(Boolean);
+  for (const [label, screen] of [['Search your files', 'search'], ['Review storage', 'storage'], ['Manage your network', 'network'], ['Adjust sound', 'audio'], ['Check protection', 'security'], ['Run project tasks', 'scripts']]) {
+    await clickButton(byLabel(page, label));
+    assert.equal(client.screen(), screen);
+  }
+  assert.equal(requests.length, 0);
+});
+
+test('Toolbox rejects accidental event-as-category input and keeps all reference guides visible', async () => {
+  const { client, modal, requests } = await browserFixture(request => {
+    assert.equal(request.url, '/api/recipes');
+    return { body: [{ category: 'Search', title: 'Find text', description: 'Search workspace files.' }, { category: 'Storage', title: 'Review space', description: 'Inspect local file sizes.' }] };
+  });
+  await client.openToolbox({ type: 'click', toString: () => '[object PointerEvent]' });
+  assert.match(modal.textContent, /Command reference/);
+  assert.match(modal.textContent, /Find text/);
+  assert.match(modal.textContent, /Review space/);
+  assert.doesNotMatch(modal.textContent, /PointerEvent|\[object Object\]|nullnull/);
+  assert.equal(requests.length, 1);
+});
+
+
+test('storage tabs support arrows, Home and End without triggering a scan or cleanup', async () => {
+  const { client, page, requests } = await browserFixture();
+  client.state.screen = 'storage';
+  client.state.storage.locations = [];
+  client.renderStorage();
+  const initial = findButton(page, 'Storage map');
+  assert.equal(initial.getAttribute('aria-selected'), 'true');
+  const right = initial.dispatch('keydown', { key: 'ArrowRight' });
+  assert.equal(right.defaultPrevented, true);
+  assert.equal(client.state.storage.tab, 'cleanup');
+  const cleanup = findButton(page, 'Review cleanup');
+  assert.equal(cleanup.getAttribute('aria-selected'), 'true');
+  cleanup.dispatch('keydown', { key: 'End' });
+  assert.equal(client.state.storage.tab, 'recovery');
+  // The heading also has a Recovery button. Select the tab by its role.
+  const findTab = node => node.getAttribute('role') === 'tab' && node.textContent === 'Recovery' ? node : node.children.map(findTab).find(Boolean);
+  findTab(page).dispatch('keydown', { key: 'Home' });
+  assert.equal(client.state.storage.tab, 'overview');
+  assert.equal(requests.length, 0);
 });

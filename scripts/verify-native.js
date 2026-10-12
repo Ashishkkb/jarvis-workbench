@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -84,4 +85,26 @@ assert.ok(Array.isArray(settings.powerPlans));
 if (settings.activePowerPlanId) assert.ok(settings.powerPlans.some(item => item.id === settings.activePowerPlanId));
 else assert.ok(settings.powerPlanError);
 console.log(JSON.stringify({ control: 'settings', available: settings.available, powerPlans: settings.powerPlans.length, reason: settings.powerPlanError }));
+const hardware = await api.getHardwareSnapshot();
+assert.equal(hardware.demo, false);
+assert.equal(hardware.platform, 'win32');
+assert.equal(hardware.components.length, 9);
+assert.ok(Number.isFinite(Date.parse(hardware.sampledAt)));
+for (const component of hardware.components) {
+  assert.ok(['ok', 'warning', 'critical', 'unknown', 'absent'].includes(component.status));
+  assert.ok(Array.isArray(component.metrics) && Array.isArray(component.limitations));
+  for (const metric of component.metrics) assert.ok(metric.value === null || typeof metric.value === 'string');
+}
+assert.ok(hardware.components.find(component => component.id === 'cpu').metrics.some(metric => metric.value !== null));
+console.log(JSON.stringify({ control: 'hardware', components: hardware.components.length, ...hardware.summary }));
+// A disposable loopback listener makes the process-name assertion deterministic.
+const listener = net.createServer();
+await new Promise((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });
+try {
+  const report = await api.listPorts();
+  const own = report.ports.find(item => item.protocol === 'TCP' && item.port === listener.address().port && item.pid === process.pid);
+  assert.ok(own, 'The port inventory must include this disposable test listener');
+  assert.match(own.process || '', /^node(?:\.exe)?$/i, 'The installed Windows collector must resolve the listener PID to its process name');
+  console.log(JSON.stringify({ control: 'ports', fixtureOwnerResolved: true }));
+} finally { await new Promise(resolve => listener.close(resolve)); }
 console.log('Native status integration passed. Read-only coverage; OS mutation qualification requires a disposable Windows test machine.');

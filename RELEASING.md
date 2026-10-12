@@ -44,12 +44,12 @@ The workflow uses only read access to the repository and GitHub's built-in artif
 After publication has been verified, install the exact version with:
 
 ```sh
-npm install --global @ashishkkb/jarvis-workbench@0.3.0
+npm install --global @ashishkkb/jarvis-workbench@0.4.0-beta.1
 jarvis --version
 jarvis doctor
 ```
 
-This selects version 0.3.0 independently of npm distribution tags. Restart running Jarvis sessions after an update. Installing an earlier published version rolls the code back; it does not undo system settings or file changes.
+This selects version 0.4.0-beta.1 independently of npm distribution tags. Restart running Jarvis sessions after an update. Installing an earlier published version rolls the code back; it does not undo system settings or file changes.
 
 ## Install, update and roll back from an archive
 
@@ -69,6 +69,6 @@ Uninstall with `npm uninstall --global @ashishkkb/jarvis-workbench`. Uninstallin
 
 Follow [SECURITY.md](SECURITY.md). Keep release notes factual about the fix and affected versions without exposing personal paths, Wi-Fi profiles/passwords, authentication tokens or unredacted activity logs.
 
-## Local qualification note for 0.3.0
+## Local qualification note
 
-On the development Windows host, the complete consumer gate passes with a task-local temporary directory. Runs in that host's profile temporary directory encountered native-helper access/launch failures; the cause is unresolved. This is separate from the PowerShell 7 module-inheritance defect fixed by this release. No security protections were changed to obtain a pass. CI continues to test ordinary OS temporary directories. Record which temporary location was used when reproducing an install problem; a pass in one environment does not establish compatibility with every host policy or temporary-folder context.
+On the development Windows host, the complete consumer gate passes with a task-local temporary directory. Runs in that host's profile temporary directory encountered native-helper access/launch failures; the cause is unresolved. This is separate from the PowerShell 7 module-inheritance defect fixed in 0.3. No security protections were changed to obtain a pass. CI continues to test ordinary OS temporary directories. Record which temporary location was used when reproducing an install problem; a pass in one environment does not establish compatibility with every host policy or temporary-folder context.

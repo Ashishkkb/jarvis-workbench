@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { run } from './run.js';
+import { clean } from './format.js';
 
 const windowsSystemDirectory = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32');
 const windowsPowerShell = path.win32.join(windowsSystemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -10,6 +11,7 @@ const windowsNetstat = path.win32.join(windowsSystemDirectory, 'netstat.exe');
 // These scripts are fixed strings. Paths, search terms, and other user input never
 // become PowerShell code; the runner invokes commands without a shell.
 export const WINDOWS_PROCESS_SCRIPT = "$ErrorActionPreference='Stop'; ConvertTo-Json -Compress -InputObject @(Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64)";
+export const WINDOWS_PORT_OWNER_SCRIPT = "$ErrorActionPreference='Stop'; ConvertTo-Json -Compress -InputObject @(Get-Process | Select-Object Id,ProcessName)";
 export const WINDOWS_PORT_SCRIPT = "$ErrorActionPreference='Stop'; $tcp = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Select-Object @{Name='Protocol';Expression={'TCP'}},LocalAddress,LocalPort,OwningProcess); $udp = @(Get-NetUDPEndpoint -ErrorAction Stop | Select-Object @{Name='Protocol';Expression={'UDP'}},LocalAddress,LocalPort,OwningProcess); ConvertTo-Json -Compress -InputObject @($tcp + $udp)";
 
 export function getSystemInfo() {
@@ -70,10 +72,10 @@ export function parsePosixProcesses(text) {
   return processes;
 }
 
-async function collect(command, args, signal) {
-  const result = await run(command, args, {
-    cwd: process.platform === 'win32' ? path.win32.dirname(command) : undefined,
-    signal, timeout: 15_000, maxOutput: 4 * 1024 * 1024, allowFailure: true,
+async function collect(command, args, signal, { execute = run, platform = process.platform, timeout = 15_000, maxOutput = 4 * 1024 * 1024 } = {}) {
+  const result = await execute(command, args, {
+    cwd: platform === 'win32' ? path.win32.dirname(command) : undefined,
+    signal, timeout, maxOutput, allowFailure: true,
   });
   // lsof uses exit 1 with empty output when no matching sockets exist.
   const emptyLsof = command === 'lsof' && result.code === 1 && !result.stdout.trim() && !result.stderr.trim();
@@ -119,6 +121,13 @@ function orderPorts(ports) {
   return [...unique.values()].sort((a, b) => a.port - b.port || a.protocol.localeCompare(b.protocol) || a.address.localeCompare(b.address) || (a.pid ?? -1) - (b.pid ?? -1));
 }
 
+function windowsPid(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') return null;
+  if (typeof value === 'string' && !/^\d+$/.test(value.trim())) return null;
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid >= 0 && pid <= 0xffffffff ? pid : null;
+}
+
 export function parseWindowsPorts(text) {
   return orderPorts(jsonRows(text)
     .filter(row => row && ['TCP', 'UDP'].includes(row.Protocol) && typeof row.LocalAddress === 'string' && isIntegerValue(row.LocalPort) && Number(row.LocalPort) >= 0 && Number(row.LocalPort) <= 65535)
@@ -126,7 +135,7 @@ export function parseWindowsPorts(text) {
       protocol: row.Protocol,
       address: row.LocalAddress,
       port: Number(row.LocalPort),
-      pid: row.OwningProcess === null || row.OwningProcess === undefined ? null : finiteNumber(row.OwningProcess, null),
+      pid: windowsPid(row.OwningProcess),
     })));
 }
 
@@ -199,38 +208,66 @@ export function parseNetstatPorts(text) {
   return orderPorts(ports);
 }
 
-export async function listPorts({ signal } = {}) {
-  const candidates = process.platform === 'win32'
-    ? [
-      [windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PORT_SCRIPT], parseWindowsPorts],
-      [windowsNetstat, ['-ano'], parseNetstatPorts],
-    ]
-    : process.platform === 'linux'
-      ? [
-        ['ss', ['-H', '-lntup'], parseSsPorts],
-        ['lsof', ['-nP', '-i', '-FpcfPnT'], parseLsofPorts],
-        ['netstat', ['-lntup'], parseNetstatPorts],
-      ]
-      : [['lsof', ['-nP', '-i', '-FpcfPnT'], parseLsofPorts]];
 
-  for (const [command, args, parse] of candidates) {
-    try {
-      const ports = parse(await collect(command, args, signal));
-      return {
-        ports,
-        ...(ports.some(port => port.pid === null) ? { warning: 'Some process owners are hidden by operating-system permissions.' } : {}),
-      };
-    } catch (error) {
-      if (signal?.aborted) throw error;
-    }
+/** Resolve display names in one bounded read; port ownership can change after either snapshot. */
+async function windowsPortOwners(ports, signal, options) {
+  if (!ports.some(port => windowsPid(port.pid) !== null)) return ports;
+  const output = await collect(windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PORT_OWNER_SCRIPT],
+    signal, { ...options, timeout: 5000, maxOutput: 1024 * 1024 });
+  const names = new Map();
+  for (const row of jsonRows(output)) {
+    const pid = windowsPid(row?.Id);
+    if (pid === null || typeof row.ProcessName !== 'string') continue;
+    const name = clean(row.ProcessName).trim().slice(0, 260);
+    if (!name) continue;
+    // Duplicate equal rows are harmless; conflicting identities remain unknown.
+    names.set(pid, names.has(pid) && names.get(pid) !== name ? null : name);
   }
-  return {
-    ports: [],
-    warning: process.platform === 'win32'
-      ? 'Could not read listening ports with Get-NetTCPConnection or netstat.'
-      : 'Could not read listening ports. Install ss (Linux) or lsof, then refresh this view.',
+  return ports.map(port => names.get(port.pid) ? { ...port, process: names.get(port.pid) } : port);
+}
+
+/** Injection keeps fallback, permission and cancellation tests independent of the host. */
+export function createPortInspector({ platform = process.platform, execute = run } = {}) {
+  return async function inspectPorts({ signal } = {}) {
+    const windows = platform === 'win32';
+    const candidates = windows
+      ? [
+        [windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PORT_SCRIPT], parseWindowsPorts],
+        [windowsNetstat, ['-ano'], parseNetstatPorts],
+      ]
+      : platform === 'linux'
+        ? [
+          ['ss', ['-H', '-lntup'], parseSsPorts],
+          ['lsof', ['-nP', '-i', '-FpcfPnT'], parseLsofPorts],
+          ['netstat', ['-lntup'], parseNetstatPorts],
+        ]
+        : [['lsof', ['-nP', '-i', '-FpcfPnT'], parseLsofPorts]];
+
+    for (const [command, args, parse] of candidates) {
+      try {
+        let ports = parse(await collect(command, args, signal, { platform, execute }));
+        if (windows) {
+          try { ports = await windowsPortOwners(ports, signal, { platform, execute }); }
+          catch (error) { if (signal?.aborted) throw error; }
+        }
+        const warnings = [];
+        if (ports.some(port => port.pid === null)) warnings.push('Some process owners are hidden by operating-system permissions.');
+        if (windows && ports.some(port => port.pid !== null && !port.process)) warnings.push('Some process names are unavailable. Their PIDs are still shown; the process may have exited or access may be restricted.');
+        return { ports, ...(warnings.length ? { warning: warnings.join(' ') } : {}) };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+      }
+    }
+    return {
+      ports: [],
+      warning: windows
+        ? 'Could not read listening ports with Get-NetTCPConnection or netstat.'
+        : 'Could not read listening ports. Install ss (Linux) or lsof, then refresh this view.',
+    };
   };
 }
+
+export const listPorts = createPortInspector();
 
 export async function getProjectScripts(root) {
   try {

@@ -14,7 +14,7 @@ node ./bin/jarvis.js --web --demo
 npm run test:package
 ```
 
-`npm run test:package` builds a real archive, installs it offline into a unique temporary prefix, exercises both commands, library imports and the local browser, then uninstalls it. It leaves your normal global installation untouched. To test source installation separately, run `npm install -g .` and then `jarvis --demo`. The planned `@ashishkkb/jarvis-workbench` registry package is not yet published; do not document registry installation as an available release until publication is verified.
+`npm run test:package` builds a real archive, installs it offline into a unique temporary prefix, exercises both commands, library imports and the local browser, then uninstalls it. It leaves your normal global installation untouched. To test source installation separately, run `npm install -g .` and then `jarvis --demo`. The registry package is `@ashishkkb/jarvis-workbench`. Use the version or beta channel documented in the README to test a published build; keep source and registry installations distinct when reporting issues.
 
 ## Change expectations
 

@@ -13,6 +13,7 @@ import { demoState } from './demo.js';
 import { clean, friendlyError, safeRemote } from './format.js';
 import { ActivityLog } from './activity.js';
 import { getAbout } from './about.js';
+import * as hardwareFunctions from './hardware.js';
 import * as storageFunctions from './storage.js';
 import * as processFunctions from './process-control.js';
 import { createControlApi } from './control-api.js';
@@ -25,6 +26,7 @@ const STATIC = new Map([
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
+  ['/hardware.css', ['hardware.css', 'text/css; charset=utf-8']],
 ]);
 
 class HttpError extends Error {
@@ -96,7 +98,7 @@ function readJson(req) {
 }
 
 /** Start a loopback-only browser dashboard. No project commands run at startup. */
-export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage, processControl, network, audio, security, settings, fileActions, operations = new OperationCoordinator() } = {}) {
+export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage, processControl, hardware, network, audio, security, settings, fileActions, operations = new OperationCoordinator() } = {}) {
   if (host !== '127.0.0.1') throw new Error('The dashboard binds only to 127.0.0.1.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Choose a valid local port.');
   const sample = demo ? demoState() : null;
@@ -112,6 +114,9 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
   const processPlans = new Map();
   const processApi = { ...processFunctions, ...processControl };
   const storageApi = { ...storageFunctions, ...storage };
+  const hardwareApi = { ...hardwareFunctions, ...hardware };
+  const hardwareController = new AbortController();
+  let hardwareFlight = null, hardwareCache = null, hardwareCachedAt = 0;
   const activityLog = demo ? null : activity || new ActivityLog();
   const demoEvents = [];
   const demoHistory = [];
@@ -128,6 +133,30 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     }
     return activityWarning;
   };
+
+  // Share a bounded read across tabs. One disconnected reader must not cancel
+  // another reader's collection. Only a completed snapshot enters this cache.
+  async function hardwareSnapshot(signal) {
+    if (signal.aborted || closing) throw new HttpError(503, 'The hardware read was cancelled.');
+    if (demo) return hardwareFunctions.getDemoHardwareSnapshot();
+    if (hardwareCache && Date.now() - hardwareCachedAt < 15_000) return hardwareCache;
+    if (!hardwareFlight) {
+      hardwareFlight = Promise.resolve().then(() => hardwareApi.getHardwareSnapshot({ signal: hardwareController.signal }))
+        .then(async snapshot => {
+          if (hardwareController.signal.aborted) throw new Error('The hardware read was cancelled.');
+          hardwareCache = snapshot;
+          hardwareCachedAt = Date.now();
+          await audit({ action: 'hardware-read', status: 'completed', message: `Hardware readings collected: ${snapshot.components.length} components; ${snapshot.summary.attention} need attention; ${snapshot.summary.unknown} unavailable.` });
+          return snapshot;
+        }).finally(() => { hardwareFlight = null; });
+    }
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(new HttpError(503, 'The hardware read was cancelled.'));
+      signal.addEventListener('abort', aborted, { once: true });
+      if (signal.aborted) aborted();
+      hardwareFlight.then(resolve, reject).finally(() => signal.removeEventListener('abort', aborted));
+    });
+  }
 
   const json = (res, status, value, sensitive = false) => {
     if (res.destroyed || res.writableEnded) return;
@@ -365,6 +394,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     queryParameters(url, []);
     if (controls.getRoutes.has(pathname)) return controls.get(pathname, signal);
     if (pathname === '/api/git') return demo ? sample.git : getGitStatus(workspace);
+    if (pathname === '/api/hardware') return hardwareSnapshot(signal);
     if (pathname === '/api/processes') return demo ? sample.processes : listProcesses({ signal });
     if (pathname === '/api/ports') return demo ? sample.ports : listPorts({ signal });
     if (pathname === '/api/disk') return demo ? sample.disk : analyzeDisk(workspace, { signal });
@@ -478,9 +508,12 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     closePromise = (async () => {
     for (const reader of readers) reader.abort();
     activeJob?.controller.abort();
+    hardwareController.abort();
+    const hardwareStopped = hardwareFlight?.catch(() => {});
     const stopped = new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     server.closeAllConnections();
     await stopped;
+    await hardwareStopped;
     if (activeJob?.promise) await activeJob.promise;
     await audit({ action: 'dashboard', status: 'stopped' });
     })();

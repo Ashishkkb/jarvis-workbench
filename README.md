@@ -2,16 +2,20 @@
 
 A local terminal and browser dashboard for finding text, understanding Git, managing files and storage, and controlling Windows networking, sound, security and power. Start with the task you want to finish; Jarvis supplies the controls and explains the command-line concepts behind them.
 
-**Version 0.3.0 / Node.js 22 or 24 / Zero npm dependencies / Apache-2.0 / No API key / No telemetry**
+**Version 0.4.0-beta.1 / Node.js 22 or 24 / Zero npm dependencies / Apache-2.0 / No API key / No telemetry**
 
 Created by **Ashish / [Ashishkkb](https://github.com/Ashishkkb)**. This is an independent, open-source project. Voice integration is separate and is not included.
 
+![Jarvis Workbench browser dashboard showing a demo workspace](https://raw.githubusercontent.com/Ashishkkb/jarvis-workbench/main/docs/images/dashboard.jpg)
+
+*Browser dashboard with sample data. Run `jarvis --web` to open your own workspace.*
+
 ## Install from npm
 
-Use Node.js 22 or 24. Install the exact version:
+Use Node.js 22 or 24. This release is on the **beta** channel. Install the exact version:
 
 ```sh
-npm install --global @ashishkkb/jarvis-workbench@0.3.0
+npm install --global @ashishkkb/jarvis-workbench@0.4.0-beta.1
 jarvis
 ```
 
@@ -43,11 +47,36 @@ node ./bin/jarvis.js --demo
 
 ## Two ways to work
 
+The browser pairs a quiet, light workspace with an indigo sidebar and restrained cyan gradients. Tool layouts, status colors, keyboard focus, dialogs and mobile navigation follow one shared design. The terminal uses the same visual hierarchy with readable ANSI colors, plain-text fallbacks and contextual keyboard hints.
+
 **Terminal:** run `jarvis`. Use the sidebar numbers, keyboard shortcuts, and task palette. The interface works in PowerShell, Bash, Zsh, and other terminals that support interactive Node programs.
 
 **Browser:** run `jarvis --web`, or press **B** in the terminal dashboard. Jarvis starts a local server and opens your browser. Keep the terminal running; closing the Jarvis session stops its server. Use `--no-open` to print the URL or `--port 4177` to choose a port.
 
 The browser server binds only to `127.0.0.1`. Its launch URL contains a random session token, and every API request requires that token. No external service or account is involved. Git operations and project scripts still use your existing credentials and may contact their configured services.
+
+## Inside your PC
+
+Open **Inside your PC** in the browser sidebar or press **I** in the terminal. The interactive board is a schematic of component groups, not a model-specific photograph or wiring diagram. Select a component to inspect its readings, individual devices, reported issues, suggested next steps and data limitations. Related tools open Processes, Storage, Network, Ports or Windows Settings.
+
+```sh
+jarvis hardware
+jarvis hardware --json
+jarvis --screen hardware
+```
+
+Windows observations cover:
+
+- CPU model, cores, clock and reported load; physical memory usage, modules and available slot information.
+- Motherboard and BIOS inventory; graphics devices, drivers and reported device status.
+- Physical disks and volumes, with storage reliability information where the device/driver exposes it.
+- Battery charge and reported design/full-charge capacity; wear estimates and cycles only where available.
+- Network adapter links, USB/controller inventory and Windows device problem codes.
+- Firmware thermal-zone readings where exposed. These are **not CPU-core temperatures**; fan speed and physical connector health may be unavailable.
+
+Each component separates observations from findings and unavailable data. A reported normal device status does not establish that the hardware is fault-free. High CPU use can be normal work; low free memory indicates pressure, not a defective RAM module. Disconnected network links and an absent battery are not automatically faults. Linux and macOS currently provide basic CPU, memory and network observations, with unsupported inventory/sensors marked unavailable.
+
+Reads run locally with current-user permissions. No driver installation, administrator elevation, stress test, repair or hardware setting change occurs. Windows probes have bounded time/output and preserve completed sections when other providers fail. There is no background polling. **Refresh readings** may reuse a completed browser snapshot for up to 15 seconds; its displayed sample time stays unchanged. Leaving the page cancels that page's wait; a shared bounded read may finish for another tab. Closing the server cancels its collection. The activity log records the completed browser read and summary counts, not device identifiers or the full inventory.
 
 ## Task recovery and release status
 
@@ -55,7 +84,7 @@ A terminal dashboard and the browser it opens share one operation slot. Browser 
 
 Native settings changes report their verified result, or an explicit partial/uncertain outcome with the previous state and restoration guidance where available. Cancellation cannot undo a change already accepted by Windows. Automatic DNS reports a request rather than claiming that effective addresses prove the configuration mode. Audio applies to the reviewed default device and refuses a changed device selection.
 
-Version 0.3 adds crash-recovery tests, consumer-install verification and a six-environment CI release gate. Real Windows status reads are checked from the installed archive. **Hardware-changing Windows paths still need qualification on disposable machines across devices and policy configurations.** See [CHANGELOG.md](CHANGELOG.md) for this release's changes and limits.
+Version 0.4 beta adds a redesigned browser and terminal interface, an in-depth hardware inspector and Windows port-owner names. It retains the crash-recovery tests, consumer-install verification and six-environment CI release gate introduced in 0.3. Real Windows status reads are checked from the installed archive. **Hardware-changing Windows paths still need qualification on disposable machines across devices and policy configurations.** See [CHANGELOG.md](CHANGELOG.md) for this release's changes and limits.
 
 ## Terminal controls
 
@@ -70,6 +99,7 @@ Version 0.3 adds crash-recovery tests, consumer-install verification and a six-e
 | `7` | Storage | Compare folder sizes, choose drive scans, and review cleanup. |
 | `8` | Project tasks | Review and run named npm scripts. |
 | `9` | Toolbox | Choose a practical task and learn its command equivalent. |
+| `I` | Inside your PC | Select a component, inspect readings, and see reported issues. |
 | `0` | Control Center | Windows Wi-Fi, sound, Defender, power plans and settings. |
 
 **Ctrl+P** opens the task palette. **Tab** switches tools; **Up/Down** selects an item; **Enter** opens it; **R** refreshes; **Esc** dismisses a prompt or cancels a task; **Q** exits. **B** opens the browser dashboard and **A** opens activity history. **$** opens Support/About from any screen.
@@ -84,6 +114,7 @@ Version 0.3 adds crash-recovery tests, consumer-install verification and a six-e
 | Storage | `S`: select a workspace, drive, home, or temporary-folder scan. `C`: review eligible cleanup. `H`: recovery history. |
 | Project tasks | `Enter`: review and run the selected script. |
 | Toolbox | `Enter`: open the tool. `E`: explanation and command examples. |
+| Inside your PC | `Enter`: full component report. `O`: related tools. `R`: read new hardware observations. |
 | Control Center | `Enter`: category actions. `W`: Wi-Fi/network. `V`: sound. `S`: security. `P`: power plan. `O`: Windows Settings. |
 
 Terminal confirmation dialogs require **Y**. Enter, N, or Esc cancels. Use `--ascii` for plain borders or `--no-color` to disable color. Redirected dashboard output produces a static frame; keyboard interaction needs an interactive terminal.
@@ -166,7 +197,7 @@ jarvis doctor
 jarvis --demo --snapshot --screen git --width 110
 ```
 
-`status`, `search`, `files`, `disk`, `locations`, `scan`, `processes`, `ports`, `network`, `sound`, `security`, and `settings` support `--json`. The `disk` command is the quick workspace summary; `locations` lists scan choices and `scan --path folder` performs the longer metadata scan. On Windows, a drive can be selected with `jarvis scan --path C:\ --json`. Recovery actions are available in the dashboards and storage API. `doctor` checks Node, Git, and optional ripgrep. Use `--` before a search phrase that starts with a dash. Run `jarvis --help` for the complete command list.
+`status`, `search`, `files`, `disk`, `locations`, `scan`, `processes`, `ports`, `network`, `sound`, `security`, and `settings` support `--json`. The `disk` command is the quick workspace summary; `locations` lists scan choices and `scan --path folder` performs the longer metadata scan. On Windows, a drive can be selected with `jarvis scan --path "C:/" --json`. Recovery actions are available in the dashboards and storage API. `doctor` checks Node, Git, and optional ripgrep. Use `--` before a search phrase that starts with a dash. Run `jarvis --help` for the complete command list.
 
 ES modules can import the source checkout directly:
 
@@ -197,7 +228,7 @@ Storage exports include `listScanLocations`, `scanStorage`, `planCleanup`, `exec
 - **Search:** literal and case-insensitive by default, using optional ripgrep or an isolated JavaScript worker. Supports `*`, `?`, and `**` filename globs. Skips binary files, files over 2 MiB, links, `.git`, dependencies, caches, and common build folders. Other hidden files are included; `.gitignore` does not define search scope. Defaults to 250 matching lines and an 8-second budget per backend. Partial results are labeled. Regexes are validated as JavaScript; unsupported native patterns use the fallback.
 - **Previews:** read at most 512 KiB. The library defaults to 160 lines; initial dashboard previews allow up to 1,000. Large tails have no invented absolute line numbers. Following a tail uses refreshed snapshots. Project browsing and previews remain inside the workspace.
 - **Processes:** view and filter running programs, then use **K** in the terminal or **Stop** in the browser to review the exact name, PID, owner, and start time before confirming. Only eligible processes owned by the current user can be stopped; Jarvis, its ancestors, and protected system processes are refused. Windows termination is immediate and can lose unsaved work. Linux/macOS send SIGTERM; a program can ignore it, in which case Jarvis reports that the request was sent and the process is still running. No force escalation or process-tree termination occurs. A reviewed identity expires after 60 seconds and is rechecked before use. Demo mode never stops a real process.
-- **Ports:** read-only inspection. Windows CPU values are cumulative seconds; Linux/macOS use percentages. Permissions can hide socket owners. Missing tools produce a readable error; Jarvis does not install system utilities.
+- **Ports:** read-only inspection of TCP listeners and bound UDP sockets. Windows resolves owner PIDs to process names in one bounded query. Names may be unavailable when a process exits or access is restricted; the endpoint and PID remain visible. Names and ports are separate snapshots, not proof of a persistent process identity. Missing tools produce a readable error; Jarvis does not install system utilities.
 - **Project tasks:** reads the workspace's `package.json`. Confirming a script runs project code and npm lifecycle hooks with your environment. Output is bounded to 256 KiB, and Esc cancels the process tree. Use a normal terminal for programs that require interactive input.
 
 ## Activity and privacy

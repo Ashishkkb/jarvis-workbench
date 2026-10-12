@@ -1,6 +1,6 @@
 {
   "name": "@ashishkkb/jarvis-workbench",
-  "version": "0.3.0",
+  "version": "0.4.0-beta.1",
   "description": "A keyboard-driven terminal workbench for search, files, Git and system tasks. No API key required.",
   "type": "module",
   "bin": {

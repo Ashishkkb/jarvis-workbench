@@ -15,3 +15,4 @@ export { getAudioStatus, setAudioSettings } from './audio.js';
 export { getSecurityStatus, planSecurityScan, runSecurityScan } from './security.js';
 export { getSystemSettings, planSettingChange, applySettingChange, openSettingsPage } from './settings.js';
 export { planFileAction, executeFileAction, listFileRecovery } from './file-actions.js';
+export { getHardwareSnapshot, getDemoHardwareSnapshot } from './hardware.js';

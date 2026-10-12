@@ -1,5 +1,17 @@
 # Changes
 
+## 0.4.0-beta.1 - 2026-10-12
+
+- Redesign the browser workspace with an indigo/cyan palette, restrained gradients, consistent cards, accessible controls and responsive layouts. Refresh the terminal visual hierarchy and palette.
+- Improve overview task shortcuts, screen descriptions and unavailable-value presentation.
+- Add Inside your PC: an interactive browser component map and a keyboard-driven terminal inspector covering CPU, memory, motherboard/BIOS, graphics, storage, battery, network, ports and cooling.
+- Add bounded, read-only Windows inventory and sensor observations, partial results, explicit unavailable readings, device findings and related-tool links. Add portable basic observations and `jarvis hardware [--json]`.
+- Share/cache browser hardware reads for 15 seconds, cancel on server shutdown, and record summary-only activity events.
+- Resolve Windows socket-owner PIDs to process names in one bounded read, keeping port rows available when an owner cannot be identified.
+- Fix Toolbox opening with a click event as its category (`[object PointerEvent]`).
+
+Hardware observations depend on firmware, drivers and OS permissions. The schematic is illustrative; unavailable sensors and normal status codes cannot rule out physical faults. This release uses the npm beta channel. Hardware-changing Windows actions still require device/policy qualification; donation details remain placeholders.
+
 ## 0.3.0 - 2026-10-12
 
 - Recover file operations after process crashes at move/restore publication boundaries; serialize recovery across processes and prevent concurrent stale-lock reclamation.

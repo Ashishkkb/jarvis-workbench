@@ -1,6 +1,6 @@
 import path from 'node:path';
 import readline from 'node:readline';
-import { renderDashboard, NAV, selection, visibleFiles, visibleProcesses, visiblePorts, CONTROL_ITEMS } from './ui.js';
+import { renderDashboard, NAV, selection, visibleFiles, visibleProcesses, visiblePorts, CONTROL_ITEMS, hardwareComponentText } from './ui.js';
 import { clean, friendlyError, plural, safeRemote } from './format.js';
 export { safeRemote } from './format.js';
 import { searchContent } from './search.js';
@@ -14,6 +14,7 @@ import { ActivityLog } from './activity.js';
 import { openBrowser } from './browser.js';
 import { getAbout } from './about.js';
 import { OperationCoordinator } from './operations.js';
+import { getHardwareSnapshot, getDemoHardwareSnapshot } from './hardware.js';
 
 export function initialState(root) {
   return {
@@ -27,7 +28,7 @@ export function initialState(root) {
 export class Dashboard {
   constructor(root, options = {}) {
     this.state = options.demo ? demoState() : initialState(root);
-    if (options.demo) this.state.control = demoControl();
+    if (options.demo) { this.state.control = demoControl(); this.state.hardware = getDemoHardwareSnapshot(); }
     this.options = options;
     this.operations = options.operations || new OperationCoordinator();
     this.input = options.input || process.stdin;
@@ -107,6 +108,7 @@ export class Dashboard {
 
   async refresh(quiet = false) {
     if (this.refreshing || this.state.busy) return;
+    if (this.state.screen === 'hardware') return this.refreshHardware();
     if (this.state.demo) { this.state.lastRefresh = new Date().toISOString(); this.draw(); return; }
     const screen = this.state.screen;
     const token = ++this.epoch;
@@ -131,6 +133,37 @@ export class Dashboard {
       if (!quiet) this.note('Workspace refreshed.');
     } catch (error) { if (token === this.epoch) this.note(friendlyError(error), 'bad'); }
     finally { this.refreshing = false; this.draw(); }
+  }
+
+  async refreshHardware() {
+    if (this.state.demo) {
+      this.state.hardware = getDemoHardwareSnapshot();
+      this.state.lastRefresh = this.state.hardware.sampledAt;
+      this.note('Sample hardware data refreshed. Run without --demo to inspect this PC.', 'muted');
+      return;
+    }
+    let readSignal;
+    const result = await this.runTask('Reading hardware information', options => {
+      readSignal = options.signal;
+      return (this.options.getHardwareSnapshot || getHardwareSnapshot)(options);
+    });
+    if (!this.running) return;
+    if (!result) {
+      if (readSignal?.aborted) this.note(this.state.hardware ? 'Hardware refresh cancelled. Previous readings are still shown.' : 'Hardware refresh cancelled. Press R to try again.', 'warn');
+      return;
+    }
+    this.state.hardware = result;
+    this.state.selected.hardware = Math.min(selection(this.state, 'hardware'), Math.max(0, (result.components?.length || 1) - 1));
+    this.note(`Hardware report: ${result.summary?.attention ?? 0} need attention; ${result.summary?.unknown ?? 0} unknown. Readings are not a full hardware diagnostic.`, result.summary?.attention ? 'warn' : 'muted');
+  }
+
+  hardwareTools(component = this.state.hardware?.components?.[selection(this.state, 'hardware')]) {
+    const aliases = { network: 'control', audio: 'control', sound: 'control', security: 'control', power: 'control', settings: 'control', storage: 'disk' };
+    const choices = (component?.actions || []).map(action => ({
+      title: action.label, description: 'Open ' + action.label, screen: aliases[action.screen] || action.screen,
+    })).filter(action => NAV.some(([screen]) => screen === action.screen));
+    if (!choices.length) return this.note('No related Jarvis controls are available for this component. Read its next steps in Details.', 'muted');
+    this.chooseControl(`${component.title}: related tools`, choices, 'These open the existing tool. Any system change still has its own review step.');
   }
 
   async open(screen) {
@@ -580,6 +613,13 @@ export class Dashboard {
   async enter() {
     const s = this.state;
     const index = selection(s);
+    if (s.screen === 'hardware') {
+      const component = s.hardware?.components?.[index];
+      if (!component) return;
+      this.showText(component.title, `Sampled: ${s.hardware.sampledAt || 'Unknown'}\n\n${hardwareComponentText(component)}`);
+      if (component.actions?.length) { this.state.modal.continue = () => this.hardwareTools(component); this.state.modal.continueLabel = 'Related tools'; }
+      this.draw(); return;
+    }
     if (s.screen === 'control') return this.controlCategory(CONTROL_ITEMS[index]?.id);
     if (s.screen === 'files' && !s.preview) {
       const item = visibleFiles(s)[index];
@@ -620,7 +660,7 @@ export class Dashboard {
     const key = s.preview && s.screen === 'files' ? 'preview' : s.screen;
     const lengths = { files: visibleFiles(s).length, search: s.search.matches?.length || 0, git: s.git?.changes?.length || 0,
       processes: visibleProcesses(s).length, ports: visiblePorts(s).length, disk: s.disk?.entries?.length || 0,
-      scripts: s.scripts.length, recipes: s.recipes.length, control: CONTROL_ITEMS.length, preview: s.preview?.lines?.length || 0 };
+      scripts: s.scripts.length, recipes: s.recipes.length, control: CONTROL_ITEMS.length, hardware: s.hardware?.components?.length || 0, preview: s.preview?.lines?.length || 0 };
     s.selected[key] = Math.max(0, Math.min((lengths[key] || 1) - 1, selection(s, key) + delta));
     this.draw();
   }
@@ -704,6 +744,7 @@ export class Dashboard {
     if (name === 'q') return this.close();
     if (text === '$') return this.support();
     if (text === '0') return this.open('control');
+    if (name === 'i' && !key.ctrl && !key.meta) return this.open('hardware');
     if (name === 'b') {
       if (!this.webServer) {
         const { startServer } = await import('./server.js');
@@ -733,7 +774,9 @@ export class Dashboard {
       else { s.fileFilter = ''; s.processFilter = ''; s.portFilter = ''; }
       this.draw(); return;
     }
-    if (s.screen === 'control') {
+    if (s.screen === 'hardware') {
+      if (name === 'o') return this.hardwareTools();
+    } else if (s.screen === 'control') {
       const category = { w: 'network', v: 'audio', s: 'security', p: 'power', o: 'settings' }[name];
       if (category) return this.controlCategory(category);
     } else if (s.screen === 'files') {

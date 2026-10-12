@@ -96,3 +96,23 @@ test('CLI help, version, and script snapshots require no interactive terminal or
   assert.match(demo.stdout, /DEMO/);
   assert.deepEqual(await contents(root), before);
 });
+
+
+test('hardware CLI exposes explicit demo JSON and a complete text report without workspace writes', async t => {
+  const { root } = await fixture(t);
+  const before = await contents(root);
+  const result = JSON.parse((await invoke(root, ['hardware', '--demo', '--json'])).stdout);
+  assert.equal(result.demo, true);
+  assert.deepEqual(result.components.map(item => item.id).sort(), ['cpu', 'memory', 'motherboard', 'gpu', 'storage', 'battery', 'network', 'ports', 'cooling'].sort());
+  assert.ok(result.components.some(item => item.status === 'unknown'));
+  const report = (await invoke(root, ['hardware', '--demo'])).stdout;
+  assert.match(report, /INSIDE YOUR PC \/ DEMO DATA/);
+  assert.match(report, /WHAT WAS REPORTED/);
+  assert.match(report, /REPORT LIMITATIONS/);
+  assert.doesNotMatch(report, /\bnull\b|\bundefined\b|\[object Object\]/);
+  const screen = (await invoke(root, ['--demo', '--snapshot', '--screen', 'hardware', '--width', '80'])).stdout;
+  assert.match(screen, /INSIDE YOUR PC/);
+  assert.match(screen, /DEMO SESSION/);
+  assert.match(screen, /Details/);
+  assert.deepEqual(await contents(root), before);
+});
