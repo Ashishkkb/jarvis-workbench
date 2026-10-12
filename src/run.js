@@ -9,6 +9,23 @@ export class ToolError extends Error {
   }
 }
 
+/** Build child-only environment; native Windows helpers must not inherit PowerShell 7 modules.
+ * Windows PowerShell launched through Node does not get pwsh's compatibility-path rewrite.
+ * Scope the override to its exact absolute system executable; user tools retain their env.
+ */
+export function commandEnvironment(command, overrides = {}) {
+  const environment = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', ...overrides };
+  if (process.platform === 'win32' && typeof command === 'string' && path.win32.isAbsolute(command)) {
+    const native = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (path.win32.normalize(command).toLowerCase() === native.toLowerCase()) {
+      // Windows env names are case insensitive; spawn chooses one when duplicate cases exist.
+      for (const key of Object.keys(environment)) if (key.toLowerCase() === 'psmodulepath') delete environment[key];
+      environment.PSModulePath = path.win32.join(path.win32.dirname(native), 'Modules');
+    }
+  }
+  return environment;
+}
+
 /** Run an executable with literal arguments. Never evaluates a shell command. */
 export function run(command, args = [], options = {}) {
   const { cwd, timeout = 20000, maxOutput = 16 * 1024 * 1024,
@@ -18,7 +35,7 @@ export function run(command, args = [], options = {}) {
     let stdout = '', stderr = '', size = 0, failure, timer, watchdog, settled = false;
     const child = spawn(command, args, {
       cwd, shell: false, windowsHide: true, detached: killTree && process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never', ...env }
+      env: commandEnvironment(command, env)
     });
     const stop = (message, code) => {
       if (failure) return;

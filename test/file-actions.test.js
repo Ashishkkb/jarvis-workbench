@@ -321,7 +321,7 @@ test('new recovery directories are private and permissive existing folders are l
   await privateRecoveryDirectory(f.recoveryDir);
   if (process.platform !== 'win32') assert.equal((await lstat(f.recoveryDir)).mode & 0o077, 0);
   else {
-    const script = `$acl=Get-Acl -LiteralPath ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(f.recoveryDir).toString('base64')}'))); [bool]$acl.AreAccessRulesProtected`;
+    const script = `$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(f.recoveryDir).toString('base64')}')); $acl=[IO.DirectoryInfo]::new($target).GetAccessControl(); [Console]::WriteLine([bool]$acl.AreAccessRulesProtected)`;
     const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
     let output = ''; child.stdout.on('data', data => { output += data; });
     assert.equal(await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', resolve); }), 0);
@@ -367,4 +367,33 @@ test('a newly created empty lease is busy and is never deleted by a contender', 
   await writeFile(path.join(f.recoveryDir, '.lock'), '');
   await assert.rejects(lockRecovery(f.recoveryDir), error => error.code === 'RECOVERY_BUSY');
   assert.equal(await readFile(path.join(f.recoveryDir, '.lock'), 'utf8'), '');
+});
+
+
+test('Windows recovery ACL enforcement works with incompatible inherited PowerShell module paths', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  const modules = path.join(f.base, 'incompatible-modules');
+  for (const name of ['Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Utility']) {
+    const folder = path.join(modules, name);
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, name + '.psd1'), `@{ModuleVersion='99.0.0';PowerShellVersion='7.0';RootModule='fake.psm1';FunctionsToExport=@('Get-Acl','ConvertTo-Json','New-Object');CmdletsToExport=@()}`);
+    await writeFile(path.join(folder, 'fake.psm1'), "throw 'This incompatible module must not be loaded.'");
+  }
+  const executable = path.win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const helper = fileURLToPath(new URL('../src/file-recovery.ps1', import.meta.url));
+  const child = spawn(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper,
+    '-PathBase64', Buffer.from(f.recoveryDir).toString('base64')], { cwd: path.dirname(executable), windowsHide: true,
+    env: { ...process.env, PSModulePath: modules }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '', errors = '';
+  child.stdout.on('data', data => { output += data; });
+  child.stderr.on('data', data => { errors += data; });
+  const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+  assert.equal(code, 0, errors);
+  assert.deepEqual(JSON.parse(output.trim()), { private: true });
+  // Revalidating the same directory proves an existing DACL is checked, not merely reported.
+  await privateRecoveryDirectory(f.recoveryDir);
+  await writeFile(path.join(f.root, 'value'), 'recover using module-independent ACL enforcement');
+  const removed = await f.execute({ action: 'trash', path: 'value' });
+  await f.execute({ action: 'restore', recoveryId: removed.recoveryId });
+  assert.equal(await readFile(path.join(f.root, 'value'), 'utf8'), 'recover using module-independent ACL enforcement');
 });

@@ -21,6 +21,12 @@ class Element {
   set textContent(value) { this.children = []; this._text = String(value); }
   get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
   get childNodes() { return this.children; }
+  cloneNode(deep = false) {
+    const clone = new Element(this.tagName, this.document);
+    clone.attributes = new Map(this.attributes); clone.dataset = { ...this.dataset }; clone._text = this._text;
+    if (deep) clone.append(...this.children.map(child => child.cloneNode(true)));
+    return clone;
+  }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name); }
   append(...children) {
@@ -97,7 +103,7 @@ async function browserFixture(respond = () => { throw new Error("Unexpected requ
     globalThis.testClient = { api, launchJob, recoverJobs, savedJob, el, setPage, openPalette, screen: () => state.screen,
       state, navigateActual, renderProcesses, reviewProcessStop, pollJob, jobWarnings, renderJobDock, fillJobModal,
       renderNetwork, renderAudio, renderSecurity, renderSettings, reviewWifiPassword, reviewDns,
-      reviewSecurityScan, customSecurityScan, openAbout, openModal, fileActions, editFileAction, reviewFileAction, fileRecovery, renderFiles };
+      reviewSecurityScan, customSecurityScan, openAbout, openModal, fileActions, editFileAction, reviewFileAction, fileRecovery, renderFiles, renderStorageMap };
 
   `, context);
   return { document, requests, headers, sessionStorage, client: context.testClient, modal: document.querySelector('#modal'), page: document.querySelector('#page') };
@@ -471,4 +477,13 @@ test('reload restores a completed storage scan result, including partial cancell
   assert.equal(client.state.storage.scan.totalBytes, 123);
   assert.equal(client.state.storage.scan.cancelled, true);
   assert.equal(client.state.storage.path, 'fixture-root');
+});
+
+
+test('cancelled storage results explain cancellation instead of inventing a time-limit cause', async () => {
+  const { client } = await browserFixture();
+  client.state.storage.scan = { root: 'fixture', totalBytes: 12, cancelled: true, truncated: true, skipped: 0, entries: [], largestFiles: [], cleanupCandidates: [] };
+  const text = client.renderStorageMap().textContent;
+  assert.match(text, /scan was cancelled/);
+  assert.doesNotMatch(text, /reached its time or entry limit/);
 });

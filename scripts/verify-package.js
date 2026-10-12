@@ -8,9 +8,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { commandEnvironment } from '../src/run.js';
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('..', import.meta.url));
+const powershell = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== '--output')) throw new Error('Usage: node scripts/verify-package.js [--output directory]');
 const output = args.length ? path.resolve(args[1]) : null;
@@ -27,9 +29,21 @@ let environment;
 let installed = false;
 let success = false;
 
+function isolatedEnvironment(source) {
+  const result = { ...source };
+  for (const key of Object.keys(result)) if (/^npm_config_/i.test(key) || /^(?:npm_token|node_auth_token)$/i.test(key)) delete result[key];
+  return result;
+}
+
 async function command(file, values, options = {}) {
   try {
-    const pending = exec(file, values, { cwd: workspace, env: environment, timeout: 60_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, shell: false, ...options });
+    const launch = { cwd: workspace, env: environment, timeout: 60_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, shell: false, ...options };
+    if (process.platform === 'win32' && file === powershell) {
+      // Keep the isolated prefix/cache/data environment while removing incompatible pwsh modules.
+      // commandEnvironment merges the parent's env, so strip registry credentials/config again.
+      launch.env = isolatedEnvironment(commandEnvironment(file, launch.env));
+    }
+    const pending = exec(file, values, launch);
     pending.child.stdin?.end();
     return await pending;
   } catch (error) {
@@ -59,7 +73,7 @@ async function runShim(name, values) {
   if (process.platform !== 'win32') return command(shim, values);
   // Use npm's PowerShell shim with literal arguments; do not construct a cmd.exe command string.
   await access(path.join(prefix, `${name}.cmd`));
-  return command('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', shim, ...values]);
+  return command(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', shim, ...values]);
 }
 async function listFiles(directory, relative = '') {
   const entries = await readdir(path.join(directory, relative), { withFileTypes: true });
@@ -84,9 +98,8 @@ try {
   await writeFile(path.join(workspace, 'hello world.txt'), 'Jarvis packaged consumer fixture\n');
   await writeFile(path.join(temporary, 'user.npmrc'), '');
   await writeFile(path.join(temporary, 'global.npmrc'), '');
-  environment = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ''}`, JARVIS_DATA_DIR: path.join(temporary, 'activity'), NO_COLOR: '1' };
   // Inherited registry credentials/config are unnecessary for an entirely offline tarball installation.
-  for (const key of Object.keys(environment)) if (/^npm_config_/i.test(key) || /^(?:npm_token|node_auth_token)$/i.test(key)) delete environment[key];
+  environment = isolatedEnvironment({ ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ''}`, JARVIS_DATA_DIR: path.join(temporary, 'activity'), NO_COLOR: '1' });
   npmCli = await findNpm();
   console.log('Packing the release and checking its file list...');
   const { stdout: packOutput } = await npm(['pack', '--json', '--pack-destination', temporary], { cwd: root });
@@ -96,7 +109,7 @@ try {
   assert.equal(path.basename(packed.filename), packed.filename);
   const archive = path.join(temporary, packed.filename);
   const packedPaths = new Set(packed.files.map(file => file.path));
-  const required = ['package.json', 'bin/jarvis.js', 'src/index.js', 'src/ui.js', 'web/index.html', 'web/app.js', 'web/styles.css', 'support.json', 'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md'];
+  const required = ['package.json', 'bin/jarvis.js', 'src/index.js', 'src/ui.js', 'web/index.html', 'web/app.js', 'web/styles.css', 'support.json', 'README.md', 'LICENSE', 'SECURITY.md', 'CONTRIBUTING.md', 'RELEASING.md', 'CHANGELOG.md'];
   for (const name of ['src', 'web', 'bin']) required.push(...(await listFiles(path.join(root, name))).map(file => `${name}/${file}`));
   for (const name of required) assert(packedPaths.has(name), `Required package file missing: ${name}`);
   for (const name of packedPaths) assert(!/(?:^|\/)(?:\.git|\.github|\.artifacts|node_modules|test|coverage|\.env(?:\..*)?|\.npmrc|\.pypirc|id_(?:rsa|ed25519)|[^/]+\.(?:tgz|pem|key))(?:\/|$)/.test(name), `Private/development file included in archive: ${name}`);
@@ -143,7 +156,7 @@ try {
   if (process.platform === 'win32') {
     const parser = path.join(temporary, 'parse-helpers.ps1');
     await writeFile(parser, "$ErrorActionPreference='Stop'\nforeach ($sourcePath in $args) { $tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$errors) | Out-Null; if ($errors.Count) { throw ($errors | Out-String) } }\n");
-    await command('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', parser, ...helpers.map(file => path.join(installedRoot, file))]);
+    await command(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', parser, ...helpers.map(file => path.join(installedRoot, file))]);
     console.log('Checking native read-only status from the installed package...');
     const native = await command(process.execPath, [path.join(root, 'scripts/verify-native.js'), installedRoot], { timeout: 150_000 });
     process.stdout.write(native.stdout);

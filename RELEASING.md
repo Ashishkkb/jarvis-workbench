@@ -56,3 +56,7 @@ Uninstall with `npm uninstall --global @ashishkkb/jarvis-workbench`. Uninstallin
 ## Security issues
 
 Follow [SECURITY.md](SECURITY.md). Keep release notes factual about the fix and affected versions without exposing personal paths, Wi-Fi profiles/passwords, authentication tokens or unredacted activity logs.
+
+## Local qualification note for 0.3.0
+
+On the development Windows host, the complete consumer gate passes with a task-local temporary directory. Runs in that host's profile temporary directory encountered native-helper access/launch failures; the cause is unresolved. This is separate from the PowerShell 7 module-inheritance defect fixed by this release. No security protections were changed to obtain a pass. CI continues to test ordinary OS temporary directories. Record which temporary location was used when reproducing an install problem; a pass in one environment does not establish compatibility with every host policy or temporary-folder context.

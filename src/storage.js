@@ -8,6 +8,7 @@ import { run } from './run.js';
 import { dataDirectory } from './activity.js';
 import { privateRecoveryDirectory, lockRecovery, syncDirectory } from './recovery-safety.js';
 
+const powershell = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const DAY = 86400000;
 const PLAN_LIFETIME = 15 * 60000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -114,7 +115,7 @@ export async function listScanLocations() {
   if (process.platform === 'win32') {
     try {
       const script = 'Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -in 2,3 } | Select-Object DeviceID,VolumeName,FreeSpace,Size | ConvertTo-Json -Compress';
-      const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 10000, maxOutput: 65536 });
+      const result = await run(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], { cwd: path.win32.dirname(powershell), timeout: 10000, maxOutput: 65536 });
       const parsed = JSON.parse(result.stdout.replace(/^\uFEFF/, '') || '[]');
       for (const drive of Array.isArray(parsed) ? parsed : [parsed]) {
         if (!/^[a-z]:$/i.test(drive?.DeviceID || '')) continue;

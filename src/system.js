@@ -3,6 +3,10 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { run } from './run.js';
 
+const windowsSystemDirectory = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32');
+const windowsPowerShell = path.win32.join(windowsSystemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const windowsNetstat = path.win32.join(windowsSystemDirectory, 'netstat.exe');
+
 // These scripts are fixed strings. Paths, search terms, and other user input never
 // become PowerShell code; the runner invokes commands without a shell.
 export const WINDOWS_PROCESS_SCRIPT = "$ErrorActionPreference='Stop'; ConvertTo-Json -Compress -InputObject @(Get-Process | Select-Object Id,ProcessName,CPU,WorkingSet64)";
@@ -68,6 +72,7 @@ export function parsePosixProcesses(text) {
 
 async function collect(command, args, signal) {
   const result = await run(command, args, {
+    cwd: process.platform === 'win32' ? path.win32.dirname(command) : undefined,
     signal, timeout: 15_000, maxOutput: 4 * 1024 * 1024, allowFailure: true,
   });
   // lsof uses exit 1 with empty output when no matching sockets exist.
@@ -83,7 +88,7 @@ export async function listProcesses({ signal } = {}) {
   const cpuLabel = windows ? 'CPU time (s)' : 'CPU (%)';
   try {
     const output = windows
-      ? await collect('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_SCRIPT], signal)
+      ? await collect(windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_SCRIPT], signal)
       : await collect('ps', ['-axo', 'pid=,comm=,%cpu=,rss='], signal);
     const processes = (windows ? parseWindowsProcesses(output) : parsePosixProcesses(output))
       .sort((a, b) => b.memory - a.memory || a.pid - b.pid);
@@ -197,8 +202,8 @@ export function parseNetstatPorts(text) {
 export async function listPorts({ signal } = {}) {
   const candidates = process.platform === 'win32'
     ? [
-      ['powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PORT_SCRIPT], parseWindowsPorts],
-      ['netstat.exe', ['-ano'], parseNetstatPorts],
+      [windowsPowerShell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PORT_SCRIPT], parseWindowsPorts],
+      [windowsNetstat, ['-ano'], parseNetstatPorts],
     ]
     : process.platform === 'linux'
       ? [

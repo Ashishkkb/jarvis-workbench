@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { once } from 'node:events';
 import { planProcessStop, stopProcess } from '../src/process-control.js';
 
@@ -107,9 +108,10 @@ test('Windows verifies creation identity again before terminating its captured h
   const { run } = await import('../src/run.js');
   const { fileURLToPath } = await import('node:url');
   const helper = fileURLToPath(new URL('../src/process-control.ps1', import.meta.url));
-  const result = await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive',
+  const powershell = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const result = await run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive',
     '-ExecutionPolicy', 'Bypass', '-File', helper, '-TargetPid', String(child.pid), '-CallerPid', String(process.pid),
-    '-Mode', 'stop', '-ExpectedStart', '0', '-ExpectedOwner', plan.owner, '-ExpectedName', plan.name]);
+    '-Mode', 'stop', '-ExpectedStart', '0', '-ExpectedOwner', plan.owner, '-ExpectedName', plan.name], { cwd: path.win32.dirname(powershell) });
   assert.equal(JSON.parse(result.stdout).error, 'PROCESS_CHANGED');
   assert.equal(child.exitCode, null);
   assert.equal(child.signalCode, null);

@@ -15,11 +15,12 @@ if (process.platform !== 'win32') {
 const root = path.resolve(process.argv[2] || fileURLToPath(new URL('..', import.meta.url)));
 const api = await import(pathToFileURL(path.join(root, 'src', 'index.js')).href);
 const powershell = path.win32.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const { commandEnvironment } = await import(pathToFileURL(path.join(root, 'src/run.js')).href);
 const execute = promisify(execFile);
 for (const helper of ['network.ps1', 'audio.ps1', 'security-status.ps1']) {
   // Add-Type is outside helper error handlers: execute/JSON failure catches broken native builds.
   const result = await execute(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'src', helper), '-Mode', 'status'],
-    { cwd: path.win32.dirname(powershell), timeout: 30_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: 'utf8' });
+    { cwd: path.win32.dirname(powershell), env: commandEnvironment(powershell), timeout: 30_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: 'utf8' });
   const data = JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim());
   assert.ok(data && typeof data === 'object' && !Array.isArray(data), `${helper} must return typed JSON`);
   if (helper === 'audio.ps1' && data.error) {
