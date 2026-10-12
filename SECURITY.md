@@ -1,6 +1,6 @@
 # Security policy
 
-Jarvis Workbench runs with the current user's filesystem and process permissions. It is not a security sandbox, an antivirus scanner, or a substitute for a backup.
+Jarvis Workbench runs with the current user's filesystem and process permissions. It is not a security sandbox, an independent antivirus engine, or a substitute for a backup. Optional Windows malware scans are performed by the installed Microsoft Defender engine after explicit confirmation.
 
 ## Supported targets
 
@@ -37,3 +37,26 @@ Git and system commands use executable-plus-argument invocation without evaluati
 There is no telemetry. Activity logs remain local, rotate around 2 MiB per file, and retain two older files. They include target paths and status/error messages. Common credential patterns are redacted on a best-effort basis; redaction is not a guarantee that arbitrary secrets are removed. Inspect logs before sharing them.
 
 Recovery manifests contain original file paths and metadata. The program requests private directory/file modes where supported; Windows access control follows the user's filesystem permissions. Protect both activity and recovery folders as personal data.
+
+## Process control
+
+Stopping a process is separate from inspecting it. A review plan is issued for one eligible PID, owner, and creation identity, expires after 60 seconds, and can be used once with explicit confirmation. The browser retains the exact plan server-side. Jarvis refuses other users' processes, its own process and ancestors, and protected system targets; it does not request administrator privileges or stop a whole process tree.
+
+Windows uses a verified native process handle for identity checks and immediate termination. Linux and macOS send SIGTERM after rechecking the process identity; no automatic SIGKILL follows. POSIX PID checks and signaling cannot be fully atomic with Node's built-in APIs, so a narrow PID-reuse race remains. Unsaved application work may be lost, especially on Windows. Cancellation after a stop request was delivered cannot undo it. Tests terminate only disposable child processes created by the test itself.
+
+
+## Native Windows controls
+
+Network connection/DNS and power-plan changes use exact, expiring, process-issued review objects and recheck the reviewed OS state. Inputs are limited to supported action schemas, known adapter/profile identities, IPv4 addresses and existing power-plan GUIDs. Sound changes validate volume/mute values and require confirmation. Settings links use a fixed URI allowlist. Native helpers receive literal arguments; they do not accept arbitrary shell commands, scripts, URLs or registry changes. OS permissions and organization policies can refuse any operation; Jarvis does not automatically elevate or change those policies.
+
+Saved Wi-Fi passwords require explicit disclosure confirmation for a selected existing profile. They are returned directly to an ephemeral view and bypass activity and operation logs. Terminal display is hidden after 45 seconds or Esc; browser handling also clears its disclosure view. This is display hygiene, not a guarantee against memory inspection, browser extensions, screen recording or other same-user software. Do not reveal secrets while sharing your screen.
+
+Defender scan plans identify quick, full or canonical custom-file/folder scope, expire after two minutes, and require the exact issued object plus confirmation. The installed scanner's Microsoft signature is checked when selecting the executable. Custom targets are checked for links and identity changes before launch. Defender's own protection policy can quarantine or remove threats. Scan output/history may include sensitive file paths. Command status is reported without claiming that successful execution establishes a malware-free system.
+
+Cancellation stops the Jarvis scanner client/monitor, not the Defender service. A cancelled or timed-out monitor explicitly reports that scanning may continue; no global Defender cancellation is sent. Permission failures, incomplete status and unknown protection flags remain visible. Tests mock Defender execution and settings mutations; development checks do not launch real antivirus scans or change the developer machine's settings.
+
+## File-manager operations
+
+Reviewed operations stay inside their workspace, reject links and protected metadata/runtime paths, and refuse existing destinations. File review is bounded and execution rechecks the source snapshot. Recovery is per-workspace, retains original paths and does not reclaim space. Copies track newly created destination items; cancellation or errors clean up only those items and report anything that cannot be removed safely. A partial result must not be presented as successful completion.
+
+Windows uses native no-overwrite directory moves. Platforms without a supported atomic no-overwrite directory operation refuse folder moves, renames and folder recovery rather than exposing an overwrite race. Regular-file operations and bounded folder copies have their documented filesystem limitations. An actively malicious process with the same user privileges can still race path checks; neither file recovery nor quarantine is a backup or security boundary against that actor.

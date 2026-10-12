@@ -35,7 +35,7 @@ async function contents(root, prefix = '') {
 test('public library imports expose all documented backends without startup side effects', () => {
   for (const name of ['searchContent', 'listDirectory', 'readPreview', 'analyzeDisk', 'getGitStatus', 'getGitDiff', 'commitAll', 'pushCurrent',
     'getProjectScripts', 'runProjectScript', 'scanStorage', 'listScanLocations', 'planCleanup', 'executeCleanup', 'restoreCleanup', 'purgeCleanup',
-    'listCleanupHistory', 'startServer', 'ActivityLog', 'getAbout']) assert.equal(typeof api[name], 'function', name);
+    'listCleanupHistory', 'startServer', 'ActivityLog', 'getAbout', 'getNetworkStatus', 'planNetworkChange', 'applyNetworkChange', 'getWifiPassword', 'getAudioStatus', 'setAudioSettings', 'getSecurityStatus', 'planSecurityScan', 'runSecurityScan', 'getSystemSettings', 'planSettingChange', 'applySettingChange', 'openSettingsPage', 'planFileAction', 'executeFileAction', 'listFileRecovery', 'planProcessStop', 'stopProcess']) assert.equal(typeof api[name], 'function', name);
   assert.ok(Array.isArray(api.RECIPES));
 });
 
@@ -88,7 +88,7 @@ test('CLI help, version, and script snapshots require no interactive terminal or
   const { root } = await fixture(t);
   const before = await contents(root);
   assert.match((await invoke(root, ['--help'])).stdout, /jarvis --web/);
-  assert.equal((await invoke(root, ['--version'])).stdout.trim(), '0.1.0');
+  assert.equal((await invoke(root, ['--version'])).stdout.trim(), api.getAbout().version);
   const snapshot = await invoke(root, ['--snapshot', '--screen', 'scripts', '--width', '80', '--ascii']);
   assert.match(snapshot.stdout, /fixture-task/);
   assert.ok(!snapshot.stdout.includes('\x1b'));

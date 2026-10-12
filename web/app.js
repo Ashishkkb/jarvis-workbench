@@ -8,6 +8,10 @@ const ICONS = {
   search: ['M21 21l-4.35-4.35', 'M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z'],
   branch: ['M6 3v12a3 3 0 1 0 3 3M6 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6M18 9a9 9 0 0 1-9 9'],
   cpu: ['M8 8h8v8H8zM4 4h16v16H4zM8 1v3M16 1v3M8 20v3M16 20v3M1 8h3M1 16h3M20 8h3M20 16h3'],
+  audio: ['M11 5 6 9H2v6h4l5 4V5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14'],
+  settings: ['M4 7h16M4 17h16M8 4v6M16 14v6'],
+  wifi: ['M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M9 16a5 5 0 0 1 6 0M12 20h.01'],
+  more: ['M5 12h.01M12 12h.01M19 12h.01'],
   network: ['M9 2h6v6H9zM3 16h6v6H3zM15 16h6v6h-6zM12 8v4M6 16v-4h12v4'],
   drive: ['M4 3h16l2 13v5H2v-5L4 3ZM2 16h20M6 19h.01M10 19h.01'],
   terminal: ['M3 4h18v16H3zM7 8l4 4-4 4M14 16h3'],
@@ -26,6 +30,7 @@ const ICONS = {
   info: ['M12 16v-4M12 8h.01', 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z'],
   clock: ['M12 7v5l3 2', 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z'],
   close: ['m6 6 12 12M6 18 18 6'],
+  stop: ['M6 6h12v12H6z'],
   play: ['m7 3 14 9-14 9V3Z'],
   copy: ['M9 9h12v12H9zM5 15H3V3h12v2'],
   box: ['m12 2 10 5v10l-10 5-10-5V7l10-5ZM2 7l10 5 10-5M12 12v10M7 4.5l10 5'],
@@ -43,6 +48,10 @@ const NAV = [
   { id: 'processes', title: 'Processes', icon: 'cpu', group: 'Your computer', description: 'See what is running' },
   { id: 'ports', title: 'Ports', icon: 'network', description: 'Find what is using a port' },
   { id: 'storage', title: 'Storage', icon: 'drive', description: 'Understand space and clean up safely' },
+  { id: 'network', title: 'Network', icon: 'wifi', group: 'Controls', description: 'Wi-Fi, adapters, IP addresses, and DNS' },
+  { id: 'audio', title: 'Sound', icon: 'audio', description: 'Volume, mute, and audio devices' },
+  { id: 'security', title: 'Security', icon: 'shield', description: 'Microsoft Defender status and scans' },
+  { id: 'settings', title: 'Settings', icon: 'settings', description: 'Frequently used system settings' },
   { id: 'scripts', title: 'Project tasks', icon: 'terminal', group: 'Tools', description: 'Run your project’s named commands' },
   { id: 'activity', title: 'Activity', icon: 'activity', description: 'A record of your local actions' },
 ];
@@ -52,12 +61,18 @@ const state = {
   files: null, filePath: '', fileFilter: '', search: { q: '', regex: false, caseSensitive: false, glob: '', result: null },
   processes: null, processFilter: '', processSort: 'memory', ports: null, portFilter: '', scripts: [], recipes: [],
   storage: { locations: [], history: [], path: '', scan: null, selected: new Set(), tab: 'overview', stale: false },
+  network: null, audio: null, security: null, settings: null,
   activeJob: null, jobs: new Map(), loading: false, requestId: 0, controller: null, toastTimer: null,
 };
 const $ = selector => document.querySelector(selector);
 const page = $('#page');
 const modal = $('#modal');
 let token = '';
+let sensitiveCleanup = null;
+let modalRevision = 0;
+let workspaceBootstrap = null;
+function clearSensitive() { const cleanup = sensitiveCleanup; sensitiveCleanup = null; cleanup?.(); }
+function onModalClose() { if (!modal.open) { clearSensitive(); delete modal.dataset.job; } }
 
 function icon(name, className = '') {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -159,7 +174,7 @@ async function api(endpoint, { method = 'GET', body, signal } = {}) {
 function toast(message, error = false) {
   const node = $('#toast');
   node.textContent = message;
-  node.className = `toast${error ? ' error' : ''}`;
+  node.className = `toast${error === 'warning' ? ' warning' : error ? ' error' : ''}`;
   node.hidden = false;
   clearTimeout(state.toastTimer);
   state.toastTimer = setTimeout(() => { node.hidden = true; }, error ? 6500 : 3600);
@@ -167,7 +182,7 @@ function toast(message, error = false) {
 function report(error) { if (error?.name !== 'AbortError') toast(error?.message || String(error), true); }
 function handle(fn) { return event => Promise.resolve().then(() => fn(event)).catch(report); }
 
-function heading(title, description, actions = [], eyebrow = 'Your local workbench') {
+function heading(title, description, actions = [], eyebrow = 'Local control center') {
   return el('div', { class: 'page-heading' }, el('div', {}, el('p', { class: 'eyebrow' }, eyebrow), el('h1', {}, title), el('p', { class: 'page-description' }, description)), actions.length ? el('div', { class: 'heading-actions' }, actions) : null);
 }
 function panel(title, subtitle, content, action = null, className = '') {
@@ -235,11 +250,18 @@ function renderError(error) {
 }
 function renderCurrent() {
   renderNavigation();
-  const renderers = { overview: renderOverview, files: renderFiles, search: renderSearch, git: renderGit, processes: renderProcesses, ports: renderPorts, storage: renderStorage, scripts: renderScripts, activity: renderActivity };
+  const renderers = { overview: renderOverview, files: renderFiles, search: renderSearch, git: renderGit, processes: renderProcesses, ports: renderPorts, storage: renderStorage, network: renderNetwork, audio: renderAudio, security: renderSecurity, settings: renderSettings, scripts: renderScripts, activity: renderActivity };
   renderers[state.screen]?.();
+}
+async function bootstrapWorkspace() {
+  if (!workspaceBootstrap) workspaceBootstrap = Promise.all([api('/api/overview'), api('/api/about').catch(() => null)]).catch(error => { workspaceBootstrap = null; throw error; });
+  const [overview, about] = await workspaceBootstrap;
+  state.overview = overview; state.root = overview.root || ''; state.git = overview.git;
+  if (about) { state.about = about; $('#footer-version').textContent = `${about.name || 'Jarvis Workbench'}${about.version ? ` v${about.version}` : ''}`; }
 }
 async function navigate(screen, { quiet = false } = {}) {
   if (!NAV.some(item => item.id === screen)) screen = 'overview';
+  if (sensitiveCleanup) { clearSensitive(); if (modal.open) modal.close(); }
   state.controller?.abort();
   state.controller = new AbortController();
   const requestId = ++state.requestId;
@@ -248,8 +270,11 @@ async function navigate(screen, { quiet = false } = {}) {
   if (!quiet) renderLoading(screen);
   try {
     const signal = state.controller.signal;
+    const needsBootstrap = !state.root;
+    if (needsBootstrap) await bootstrapWorkspace();
+    if (requestId !== state.requestId) return;
     if (screen === 'overview') {
-      state.overview = await api('/api/overview', { signal });
+      if (!needsBootstrap) state.overview = await api('/api/overview', { signal });
       state.root = state.overview.root || state.root; state.git = state.overview.git;
       const results = await Promise.allSettled([api('/api/activity', { signal }), api('/api/about', { signal })]);
       if (results[0].status === 'fulfilled') state.activity = Array.isArray(results[0].value) ? results[0].value : [];
@@ -258,6 +283,7 @@ async function navigate(screen, { quiet = false } = {}) {
     else if (screen === 'git') state.git = await api('/api/git', { signal });
     else if (screen === 'processes') state.processes = await api('/api/processes', { signal });
     else if (screen === 'ports') state.ports = await api('/api/ports', { signal });
+    else if (['network', 'audio', 'security', 'settings'].includes(screen)) state[screen] = await api(`/api/${screen}`, { signal });
     else if (screen === 'scripts') state.scripts = await api('/api/scripts', { signal });
     else if (screen === 'activity') state.activity = await api('/api/activity', { signal });
     else if (screen === 'storage') {
@@ -287,7 +313,7 @@ function gitLabel(git) {
 }
 function gitSummaryCard() {
   const git = state.git;
-  if (!git?.isRepo) return panel('A home for your work', 'Git & sync', empty('No Git repository here', 'Open a Git project to review changes and upload saved commits.', 'branch', button('Explore files', 'folder', () => navigate('files')), true));
+  if (!git?.isRepo) return panel('Git workspace', 'Git & sync', empty('No Git repository here', 'Open a Git project to review changes and upload saved commits.', 'branch', button('Explore files', 'folder', () => navigate('files')), true));
   const body = el('div', {},
     el('div', { class: 'repo-line' }, el('span', { class: 'repo-logo' }, icon('folder')), el('div', { class: 'repo-info' }, el('strong', {}, basename(git.root || state.root)), el('small', { title: git.root || state.root }, git.remoteUrl || git.root || 'Local repository')), badge(git.branch || 'Detached', '', 'branch')),
     el('div', { class: 'sync-steps' },
@@ -295,34 +321,36 @@ function gitSummaryCard() {
       el('div', { class: 'sync-step' }, el('span', { class: 'sync-step-icon' }, icon('check')), el('strong', {}, git.lastCommit ? 'Saved locally' : 'No commits yet'), el('small', {}, git.lastCommit?.hash || 'Your next milestone')),
       el('div', { class: 'sync-step' }, el('span', { class: 'sync-step-icon' }, icon('cloud')), el('strong', {}, git.ahead ? `${git.ahead} to upload` : git.upstream ? 'Remote tracked' : 'Not connected'), el('small', {}, git.upstream || 'Set up an upstream'))),
     el('div', { class: 'sync-note' }, icon('info'), 'Remote status reflects your last fetch.'));
-  const card = panel('Your project, in sync', 'A clear path from local changes to saved work.', body, badge(git.changes?.length ? 'Changes pending' : 'Working tree clean', git.changes?.length ? 'warn' : 'good'));
+  const card = panel('Repository status', 'Review changes, save a commit, then upload.', body, badge(git.changes?.length ? 'Changes pending' : 'Working tree clean', git.changes?.length ? 'warn' : 'good'));
   card.append(el('div', { class: 'panel-footer' }, el('span', {}, git.lastCommit ? `Last save · ${git.lastCommit.subject}` : 'Start with a local commit.'), textButton('Open Git & sync', () => navigate('git'))));
   return card;
 }
+function actionLabel(value) { return String(value || 'Local action').replace(/[-_]+/g, ' ').replace(/^\w/, letter => letter.toUpperCase()); }
+function activityTone(status) { return ['failed', 'error'].includes(status) ? 'bad' : ['completed', 'success', 'succeeded'].includes(status) ? 'good' : ['started', 'queued', 'running', 'cancelled'].includes(status) ? 'warn' : ''; }
 function activityPreview() {
   const items = (Array.isArray(state.activity) ? state.activity : []).slice(0, 3);
-  return items.length ? el('div', { class: 'activity-preview' }, items.map(item => el('div', { class: 'activity-item' }, el('span', { class: 'activity-symbol' }, icon(item.status === 'failed' ? 'alert' : 'check')), el('div', { class: 'activity-copy' }, el('strong', {}, item.action || 'Local action'), el('p', {}, item.message || item.target || '')), el('span', { class: 'activity-time' }, relativeTime(item.time))))) : empty('A fresh workspace', 'Scans, saves, and other actions will appear here as you work.', 'activity', null, true);
+  return items.length ? el('div', { class: 'activity-preview' }, items.map(item => el('div', { class: 'activity-item' }, el('span', { class: 'activity-symbol' }, icon(item.status === 'failed' ? 'alert' : ['completed', 'success', 'succeeded'].includes(item.status) ? 'check' : 'clock')), el('div', { class: 'activity-copy' }, el('strong', {}, actionLabel(item.action)), el('p', {}, item.message || item.target || '')), el('span', { class: 'activity-time' }, relativeTime(item.time))))) : empty('A fresh workspace', 'Scans, saves, and other actions will appear here as you work.', 'activity', null, true);
 }
 function renderOverview() {
   const system = state.overview?.system || {};
   const git = state.git;
   const used = Math.max(0, Number(system.memoryTotal || 0) - Number(system.memoryFree || 0));
   const percentage = system.memoryTotal ? Math.round(used / system.memoryTotal * 100) : 0;
-  const machine = panel('A little system clarity', 'A live snapshot of your computer.', el('div', {},
+  const machine = panel('System memory', 'Current memory allocation and processor count.', el('div', {},
     el('div', { class: 'machine-summary' }, donut([{ value: used }, { value: system.memoryFree || 0, color: '#e6eedb' }], `${percentage}%`, 'MEMORY IN USE'), el('div', { class: 'machine-values' }, el('div', {}, el('span', { class: 'legend-dot swatch-0' }), el('small', {}, 'In use'), el('strong', {}, bytes(used))), el('div', {}, el('span', { class: 'legend-dot swatch-6' }), el('small', {}, 'Available'), el('strong', {}, bytes(system.memoryFree))))),
     el('div', { class: 'machine-specs' }, el('span', {}, icon('cpu'), `${number(system.cpus)} CPU cores`), el('span', {}, icon('clock'), `Up ${duration(system.uptime)}`))), textButton('Details', () => navigate('processes')));
-  const storage = panel('Room for what’s next', '', el('div', {}, el('div', {}, el('p', {}, 'See where your space goes. Review old temporary files before moving anything.'), textButton('Explore storage', () => navigate('storage'))), el('div', { class: 'storage-illustration', 'aria-hidden': 'true' })), badge('ON YOUR DEVICE', ''), 'storage-teaser');
+  const storage = panel('Storage analysis', '', el('div', {}, el('div', {}, el('p', {}, 'See where your space goes. Review old temporary files before moving anything.'), textButton('Explore storage', () => navigate('storage'))), el('div', { class: 'storage-illustration', 'aria-hidden': 'true' })), badge('ON YOUR DEVICE', ''), 'storage-teaser');
   const storageBody = storage.querySelector('.panel-body');
   storageBody.replaceChildren(...storageBody.firstChild.childNodes);
   const quick = (title, description, name, screen) => el('button', { type: 'button', class: 'quick-action', onClick: () => navigate(screen) }, el('span', { class: 'quick-action-icon' }, icon(name)), el('span', {}, el('strong', {}, title), el('p', {}, description)), icon('arrow'));
   setPage(
-    heading('Your workspace, at a glance.', 'Less command line to remember. More room to get things done.', [button('Toolbox', 'sparkles', handle(openToolbox)), button('Refresh', 'refresh', () => navigate('overview'), 'primary')], 'A little clarity. A lot less friction.'),
+    heading('Overview', 'Files, development tools, and system controls in one local workspace.', [button('Toolbox', 'sparkles', handle(openToolbox)), button('Refresh', 'refresh', () => navigate('overview'), 'primary')], 'Jarvis Workbench'),
     state.overview?.demo ? notice('Demo workspace — all sample data is labeled. Local actions are disabled by the server.', 'warning') : null,
     state.overview?.activityWarning ? notice(state.overview.activityWarning, 'warning') : null,
     el('div', { class: 'metrics' }, metric('Files to save', git?.isRepo ? number(git.changes?.length || 0) : '—', git?.isRepo ? (git.clean ? 'Your working tree is clean' : 'Review before you commit') : 'Open a Git project to begin', 'file', !!git?.clean), metric('Ready to upload', git?.isRepo ? number(git.ahead || 0) : '—', git?.upstream ? 'Commits since last fetched remote' : 'No upstream branch configured', 'upload'), metric('Memory available', bytes(system.memoryFree), `of ${bytes(system.memoryTotal)} total memory`, 'cpu'), metric('Logical CPU cores', number(system.cpus), system.hostname || 'On your computer', 'grid')),
-    el('div', { class: 'overview-grid' }, el('div', { class: 'stack' }, gitSummaryCard(), panel('Recent activity', 'Your work, with a little more visibility.', activityPreview(), textButton('View all', () => navigate('activity')))), el('div', { class: 'stack' }, machine, storage)),
-    el('div', { class: 'section-caption' }, el('h2', {}, 'What would you like to do?'), el('span', { class: 'subtle', text: 'Small shortcuts. Big difference.' })),
-    el('div', { class: 'quick-actions' }, quick('Find anything', 'Search text and code across your workspace.', 'search', 'search'), quick('Save & sync', 'Know what’s saved and what’s uploaded.', 'branch', 'git'), quick('Make a little room', 'Understand storage. Clean up with a plan.', 'drive', 'storage')),
+    el('div', { class: 'overview-grid' }, el('div', { class: 'stack' }, gitSummaryCard(), panel('Recent activity', 'Recent scans, changes, and system actions.', activityPreview(), textButton('View all', () => navigate('activity')))), el('div', { class: 'stack' }, machine, storage)),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Workspace tools'), el('span', { class: 'subtle', text: 'Choose a task to get started' })),
+    el('div', { class: 'quick-actions' }, quick('Find anything', 'Search text and code across your workspace.', 'search', 'search'), quick('Save & sync', 'Know what’s saved and what’s uploaded.', 'branch', 'git'), quick('Analyze storage', 'Understand storage. Clean up with a plan.', 'drive', 'storage')),
   );
 }
 
@@ -334,15 +362,53 @@ function renderFiles() {
   const data = state.files || { entries: [], path: '', parent: null };
   const rows = el('tbody');
   const count = el('span');
+  const openEntry = item => item.type === 'directory' ? (state.filePath = item.path, navigate('files')) : openPreview(item.path);
   const fill = () => {
     const filtered = data.entries.filter(item => item.name.toLowerCase().includes(state.fileFilter.toLowerCase()));
-    rows.replaceChildren(...filtered.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon(item.type === 'directory' ? 'folder' : 'file'), el('button', { type: 'button', onClick: handle(() => item.type === 'directory' ? (state.filePath = item.path, navigate('files')) : openPreview(item.path)) }, item.name))), el('td', {}, badge(item.type)), el('td', { class: 'nowrap' }, item.type === 'directory' ? '—' : bytes(item.size)), el('td', { class: 'nowrap' }, timestamp(item.modified)), el('td', { class: 'right' }, iconButton(item.type === 'directory' ? 'chevron' : 'search', `Open ${item.name}`, handle(() => item.type === 'directory' ? (state.filePath = item.path, navigate('files')) : openPreview(item.path)))))));
-    if (!filtered.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty(state.fileFilter ? 'No matching files' : 'This folder is empty', state.fileFilter ? 'Try another filename or clear the filter.' : 'There are no files to show in this folder.', 'folder', null, true))));
-    count.textContent = `${number(filtered.length)} ${filtered.length === 1 ? 'item' : 'items'}${state.fileFilter ? ` · filtered from ${number(data.entries.length)}` : ''}`;
+    rows.replaceChildren(...filtered.slice(0, 1000).map(item => el('tr', {},
+      el('td', {}, el('div', { class: 'cell-name' }, icon(item.type === 'directory' ? 'folder' : 'file'), el('button', { type: 'button', onClick: handle(() => openEntry(item)) }, item.name))),
+      el('td', {}, badge(item.type)), el('td', { class: 'nowrap' }, item.type === 'directory' ? '—' : bytes(item.size)), el('td', { class: 'nowrap' }, timestamp(item.modified)),
+      el('td', { class: 'right' }, el('div', { class: 'row-actions' }, iconButton(item.type === 'directory' ? 'chevron' : 'search', `Open ${item.name}`, handle(() => openEntry(item))), iconButton('more', `Actions for ${item.name}`, () => fileActions(item)))))));
+    if (!filtered.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty(state.fileFilter ? 'No matching files' : 'This folder is empty', state.fileFilter ? 'Try another filename or clear the filter.' : 'Create a folder or add files from your computer.', 'folder', null, true))));
+    count.textContent = `${number(filtered.length)} ${filtered.length === 1 ? 'item' : 'items'}${filtered.length > 1000 ? ' · showing first 1,000; filter to narrow the list' : ''}${state.fileFilter ? ` · filtered from ${number(data.entries.length)}` : ''}`;
   };
   fill();
-  const content = el('section', { class: 'panel' }, el('div', { class: 'panel-toolbar' }, el('div', { class: 'path-label' }, data.parent !== null ? iconButton('back', 'Go to parent folder', () => { state.filePath = data.parent || ''; navigate('files'); }) : icon('folder'), el('code', { title: `${state.root}/${data.path}` }, data.path || basename(state.root))), searchField('Filter this folder…', state.fileFilter, value => { state.fileFilter = value; fill(); })), el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Name', 'Type', 'Size', 'Modified', ''].map(name => el('th', {}, name)))), rows)), el('div', { class: 'table-end' }, count, el('span', {}, 'Files stay within this workspace')));
-  setPage(heading('A place for everything.', 'Explore folders, preview files, and get to the part of a log that matters.', [button('Refresh', 'refresh', () => navigate('files'))], 'Files & folders'), content);
+  const content = el('section', { class: 'panel files-panel' }, el('div', { class: 'panel-toolbar' }, el('div', { class: 'path-label' }, data.parent !== null ? iconButton('back', 'Go to parent folder', () => { state.filePath = data.parent || ''; navigate('files'); }) : icon('folder'), el('code', { title: `${state.root}/${data.path}` }, data.path || basename(state.root))), searchField('Filter this folder...', state.fileFilter, value => { state.fileFilter = value; fill(); })),
+    el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Name', 'Type', 'Size', 'Modified', 'Actions'].map(name => el('th', {}, name)))), rows)), el('div', { class: 'table-end' }, count, el('span', {}, 'Files stay within this workspace')));
+  setPage(heading('Files', 'Browse, preview, and organize the files in your workspace.', [button('Recovery', 'undo', handle(fileRecovery)), button('New folder', 'folder', () => editFileAction('mkdir'), 'primary'), button('Refresh', 'refresh', () => navigate('files'))], 'Files & folders'), content,
+    el('p', { class: 'muted-caption' }, 'Use the actions menu on a row to copy, move, rename, or move an item to recovery. Existing files are never overwritten.'));
+}
+function fileActions(item) {
+  const actions = [['copy', 'Copy', 'Create a copy at a new workspace path.', 'copy'], ['move', 'Move', 'Move this item to a different workspace path.', 'folder'], ['rename', 'Rename', 'Change the name in its current folder.', 'file'], ['trash', 'Move to recovery', 'Remove this item from its folder, with an option to restore.', 'undo']];
+  openModal(item.name, el('div', {}, el('p', { class: 'path-label' }, item.path), el('div', { class: 'file-action-list' }, actions.map(([action, label, description, name]) => el('button', { type: 'button', class: 'file-action', onClick: handle(() => action === 'trash' ? reviewFileAction({ action, path: item.path }) : editFileAction(action, item)) }, icon(name), el('span', {}, el('strong', {}, label), el('small', {}, description)), icon('chevron'))))));
+}
+function editFileAction(action, item) {
+  const input = el('input', { type: 'text', value: action === 'rename' ? item.name : '', autocomplete: 'off', placeholder: action === 'mkdir' ? 'New folder name' : action === 'rename' ? 'New name' : 'folder/new-name.ext' });
+  const label = action === 'mkdir' ? 'Folder name' : action === 'rename' ? 'New name' : 'Destination path';
+  const title = ({ mkdir: 'Create a folder', copy: 'Copy an item', move: 'Move an item', rename: 'Rename an item' })[action];
+  const details = [['Workspace', state.root], ['Current folder', state.filePath || '/'], ...(item ? [['Source', item.path]] : [])];
+  openModal(title, el('div', {}, el('div', { class: 'review-details' }, definition(details)), formField(label, input, ['copy', 'move'].includes(action) ? 'Enter the complete destination path relative to this workspace, including the new filename or folder name.' : 'Use a name without folder separators.')),
+    { confirmText: 'Review change', onConfirm: async () => {
+      const value = input.value.trim(); if (!value) throw new Error(`Enter a ${label.toLowerCase()}.`);
+      await reviewFileAction({ action, path: item?.path ?? state.filePath, ...(['copy', 'move'].includes(action) ? { destination: value } : { name: value }) });
+    } });
+}
+async function reviewFileAction(body) {
+  const plan = await api('/api/files/plan', { method: 'POST', body });
+  const title = ({ mkdir: 'Create folder', copy: 'Copy item', move: 'Move item', rename: 'Rename item', trash: 'Move to recovery', restore: 'Restore item' })[body.action];
+  const details = [['Workspace', state.root], ['Action', title], ...(body.path !== undefined ? [['Source', body.path || '/']] : []), ...(body.name ? [['New name', body.name]] : []), ...(body.destination ? [['Destination', body.destination]] : []), ...(plan.destination ? [['Target', plan.destination]] : []), ...(Number.isFinite(plan.files) ? [['Files', number(plan.files)], ['Size', bytes(plan.bytes || 0)]] : [])];
+  openModal(`${title}?`, el('div', {}, el('div', { class: 'review-details' }, definition(details)),
+    notice(plan.warning || (body.action === 'trash' ? 'This item will move into workspace recovery. Its space will still be used, and you can restore it later.' : 'Jarvis checks the item again before applying this change. Existing destination files will not be overwritten.'), body.action === 'trash' ? 'warning' : ''),
+    (plan.warnings || []).map(warning => notice(warning, 'warning'))),
+    { confirmText: title, confirmIcon: body.action === 'trash' ? 'undo' : 'check', onConfirm: () => launchJob('/api/files/execute', { planId: plan.id, confirmed: true }, title, async () => {
+      if (state.screen === 'files') { state.files = await api(`/api/files?path=${encodeURIComponent(state.filePath)}`); renderFiles(); }
+    }, 'files') });
+}
+async function fileRecovery() {
+  const result = await api('/api/files/recovery');
+  const records = Array.isArray(result) ? result : result.records || result.history || [];
+  const content = records.length ? el('div', {}, notice('Items in recovery still use disk space. Restoring never overwrites an existing file.'), el('div', { class: 'recovery-list' }, records.map(item => el('div', { class: 'setting-row' }, icon('undo'), el('div', { class: 'setting-copy' }, el('h3', {}, item.originalPath || item.path || item.name || 'Recovered item'), el('p', {}, timestamp(item.createdAt || item.time)), item.status ? badge(item.status) : null), item.available === true ? button('Review restore', 'undo', handle(() => reviewFileAction({ action: 'restore', recoveryId: item.id })), 'small', { disabled: !!state.activeJob }) : null)))) : empty('Workspace recovery is empty', 'Items you move to recovery from the file manager will appear here.', 'undo', null, true);
+  openModal('Workspace recovery', content, { subtitle: state.root, wide: true });
 }
 
 async function openPreview(path, line = null) {
@@ -385,14 +451,14 @@ function renderSearch() {
     } finally { submit.disabled = false; }
   };
   const form = el('form', { class: 'panel search-panel', onSubmit: event => { event.preventDefault(); void search(); } }, el('div', { class: 'search-form' }, el('div', { class: 'field-search' }, icon('search'), query), submit), el('div', { class: 'search-options' }, el('label', { class: 'check-label' }, regex, 'Use regular expressions'), el('label', { class: 'check-label' }, caseSensitive, 'Match letter case'), el('label', { class: 'glob-control' }, 'File pattern', glob)));
-  setPage(heading('Find your needle.', 'Search your project without memorizing grep. Start with a word or use a pattern.', [button('Search tips', 'sparkles', handle(() => openToolbox('Search')))], 'Search across your workspace'), form, results);
+  setPage(heading('Search files', 'Search your project without memorizing grep. Start with a word or use a pattern.', [button('Search tips', 'sparkles', handle(() => openToolbox('Search')))], 'Search across your workspace'), form, results);
   fillResults(results);
   query.focus();
   if (state.search.autoRun) { state.search.autoRun = false; void search(); }
 }
 function fillResults(holder) {
   const result = state.search.result;
-  if (!result) { holder.replaceChildren(el('div', { class: 'panel' }, empty('Good things are easier to find.', 'Try a function name, an error message, or TODO. Dependencies, caches, and build folders are skipped.', 'search'))); return; }
+  if (!result) { holder.replaceChildren(el('div', { class: 'panel' }, empty('Search within file contents', 'Try a function name, an error message, or TODO. Dependencies, caches, and build folders are skipped.', 'search'))); return; }
   if (!result.matches?.length) { holder.replaceChildren(el('div', { class: 'panel' }, empty('No matches this time', 'Try a shorter phrase, another file pattern, or turn off case matching.', 'search'))); if (result.truncated) holder.prepend(notice('The search reached its limit. Narrow the search and try again.', 'warning')); return; }
   const groups = new Map();
   result.matches.forEach(match => { if (!groups.has(match.path)) groups.set(match.path, []); groups.get(match.path).push(match); });
@@ -404,14 +470,14 @@ function fillResults(holder) {
 
 function renderGit() {
   const git = state.git;
-  if (!git?.isRepo) { setPage(heading('Know what’s saved.', 'A clear view of your local changes and your last known remote status.', [], 'Git & sync'), el('div', { class: 'panel' }, empty('This folder isn’t a Git repository', 'Open Jarvis in a Git project to review, save, and upload your work.', 'branch'))); return; }
+  if (!git?.isRepo) { setPage(heading('Git & sync', 'A clear view of your local changes and your last known remote status.', [], 'Git & sync'), el('div', { class: 'panel' }, empty('This folder isn’t a Git repository', 'Open Jarvis in a Git project to review, save, and upload your work.', 'branch'))); return; }
   const changes = git.changes || [];
   const rows = changes.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('file'), el('button', { type: 'button', onClick: handle(() => openDiff(item.path)) }, item.path))), el('td', {}, badge(item.kind, item.kind === 'conflict' ? 'bad' : item.kind === 'untracked' ? 'good' : '')), el('td', { class: 'right' }, iconButton('search', `Review ${item.path}`, handle(() => openDiff(item.path))))));
   const changeTable = changes.length ? table(['Changed file', 'Status', ''], rows, `${number(changes.length)} changed files in the whole Git repository`) : el('section', { class: 'panel' }, empty('Your working tree is clean', git.ahead ? 'Your changes are saved locally. There are still commits ready to upload.' : 'There are no uncommitted changes. Fetch to refresh your view of the remote.', 'check'));
   const ready = !git.conflicts && !git.operation && !git.detached;
   const actions = panel('One step at a time', 'Review first. Then choose an action.', el('div', { class: 'git-actions' }, button('Save snapshot', 'check', handle(() => reviewGit('commit')), 'primary', { disabled: !changes.length || !ready }), button('Upload commits', 'upload', handle(() => reviewGit('push')), '', { disabled: !git.remoteUrl || !ready || git.unborn }), button('Download updates', 'download', handle(() => reviewGit('pull')), '', { disabled: !git.remoteUrl || !ready || !git.clean }), button('Fetch remote status', 'refresh', handle(() => launchAction('fetch', {}, 'Fetching remote status')), '', { disabled: !git.remoteUrl }), el('p', {}, 'A snapshot stages every changed file in this Git repository. Upload sends saved commits to your existing remote.')));
   const info = panel('Repository details', null, definition([['Root', git.root], ['Branch', git.branch || 'Detached HEAD'], ['Upstream', git.upstream || 'Not configured'], ['Remote', git.remoteUrl || 'Not configured'], ['Last save', git.lastCommit ? `${git.lastCommit.hash} · ${git.lastCommit.subject}` : 'No commits yet']]));
-  setPage(heading('Know what’s saved.', 'Your local changes, saved commits, and remote status — in one clear view.', [button('Refresh', 'refresh', () => navigate('git'))], 'Git & sync'),
+  setPage(heading('Git & sync', 'Your local changes, saved commits, and remote status — in one clear view.', [button('Refresh', 'refresh', () => navigate('git'))], 'Git & sync'),
     notice('Ahead and behind counts reflect your last fetch. A clean working tree does not mean every commit is uploaded.'),
     git.conflicts || git.operation || git.detached ? notice(git.conflicts ? 'Resolve merge conflicts in your editor before saving or syncing.' : git.operation ? `A ${git.operation} is in progress. Finish it in Git before continuing.` : 'You are viewing a detached commit. Switch to a branch before saving or uploading.', 'warning') : null,
     el('div', { class: 'metrics' }, metric('Changed files', number(changes.length), 'Included in Save snapshot', 'file'), metric('Commits to upload', number(git.ahead), 'Compared with last fetched remote', 'upload'), metric('Updates to download', number(git.behind), 'Fast-forward only', 'download'), metric('Current branch', git.branch || 'Detached', gitLabel(git), 'branch')),
@@ -447,18 +513,197 @@ function renderProcesses() {
   const rows = el('tbody'); const summary = el('span');
   const fill = () => {
     const items = data.processes.filter(item => `${item.name} ${item.pid}`.toLowerCase().includes(state.processFilter.toLowerCase())).sort((a, b) => Number(b[state.processSort] || 0) - Number(a[state.processSort] || 0));
-    rows.replaceChildren(...items.slice(0, 600).map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('box'), item.name)), el('td', { class: 'mono' }, item.pid), el('td', {}, Number(item.cpu || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })), el('td', {}, bytes(item.memory)), el('td', {}, badge('Running', 'good')))));
-    if (!items.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty('No matching processes', 'Try another name or process ID.', 'cpu', null, true))));
+    rows.replaceChildren(...items.slice(0, 600).map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('box'), item.name)), el('td', { class: 'mono' }, item.pid), el('td', {}, Number(item.cpu || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })), el('td', {}, bytes(item.memory)), el('td', {}, badge('Running', 'good')), el('td', { class: 'right' }, button('Stop', 'stop', handle(() => reviewProcessStop(item)), 'small process-stop', { 'aria-label': `Review stopping ${item.name} (PID ${item.pid})`, disabled: !!state.activeJob })))));
+    if (!items.length) rows.append(el('tr', {}, el('td', { colspan: 6 }, empty('No matching processes', 'Try another name or process ID.', 'cpu', null, true))));
     summary.textContent = `${number(items.length)} processes${items.length > 600 ? ' · showing first 600' : ''} · ${data.cpuLabel}`;
   };
   fill();
   const sort = el('select', { 'aria-label': 'Sort processes', onChange: event => { state.processSort = event.target.value; fill(); } }, el('option', { value: 'memory', selected: state.processSort === 'memory' }, 'Highest memory first'), el('option', { value: 'cpu', selected: state.processSort === 'cpu' }, 'Highest CPU first'));
-  setPage(heading('Meet your background crew.', 'See what is running, how much memory it uses, and where to look next.', [button('Refresh', 'refresh', () => navigate('processes'))], 'Processes'),
+  setPage(heading('Processes', 'See what is running, inspect memory use, and review a process before stopping it.', [button('Refresh', 'refresh', () => navigate('processes'))], 'Processes'),
     data.warning ? notice(data.warning, 'warning') : null,
-    el('div', { class: 'toolbar' }, searchField('Filter by process name or PID…', state.processFilter, value => { state.processFilter = value; fill(); }), sort, badge('INSPECTION ONLY', '', 'shield')),
-    el('section', { class: 'panel' }, el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Process', 'PID', data.cpuLabel, 'Memory', 'Status'].map(value => el('th', {}, value)))), rows)), el('div', { class: 'table-end' }, summary, el('span', {}, 'Refresh for a new snapshot'))),
-    el('p', { class: 'muted-caption' }, 'Windows reports cumulative CPU seconds; Linux and macOS report CPU percentage. Jarvis does not stop processes.'));
+    el('div', { class: 'toolbar' }, searchField('Filter by process name or PID…', state.processFilter, value => { state.processFilter = value; fill(); }), sort, badge('REVIEW BEFORE STOPPING', '', 'shield')),
+    el('section', { class: 'panel' }, el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Process', 'PID', data.cpuLabel, 'Memory', 'Status', 'Action'].map(value => el('th', {}, value)))), rows)), el('div', { class: 'table-end' }, summary, el('span', {}, 'Refresh for a new snapshot'))),
+    el('p', { class: 'muted-caption' }, 'Windows reports cumulative CPU seconds; Linux and macOS report CPU percentage. Stopping affects only the selected process and can lose unsaved work.'));
 }
+async function reviewProcessStop(item) {
+  if (state.activeJob) throw new Error('Another task is running. Let it finish or cancel it before stopping a process.');
+  const plan = await api('/api/processes/plan', { method: 'POST', body: { pid: item.pid } });
+  const body = el('div', {},
+    notice('Unsaved work can be lost. Save your work in this application before continuing.', 'warning', 'alert'),
+    el('div', { class: 'review-details process-review' }, definition([
+      ['Process', plan.name], ['PID', plan.pid], ['Owner', plan.owner],
+      ['Started / identity', plan.startedAt], ['Stop method', plan.method], ['Review expires', timestamp(plan.expiresAt)],
+    ])),
+    notice(plan.warning || (plan.platform === 'win32'
+      ? 'Windows stops this process immediately; the application may not get a chance to save.'
+      : 'Jarvis sends SIGTERM. The application may take time to exit or may keep running.'), 'warning'),
+    el('p', { class: 'muted-caption' }, 'Only this process is targeted. Jarvis checks its identity again before sending the stop request.'));
+  openModal(`Stop ${plan.name}?`, body, {
+    subtitle: `PID ${plan.pid}`, confirmText: 'Stop process', danger: true, confirmIcon: 'stop',
+    onConfirm: () => launchJob('/api/processes/stop', { planId: plan.id, confirmed: true }, `Stop ${plan.name} (PID ${plan.pid})`, async () => {
+      state.processes = await api('/api/processes');
+      if (state.screen === 'processes') renderProcesses();
+    }, 'process-stop'),
+  });
+}
+
+function controlUnavailable(title, data, setting) {
+  return el('section', { class: 'panel' }, empty(title, data.reason || data.message || data.warning || 'This control is available on supported Windows computers.', 'settings', setting ? button('Open Windows settings', 'external', handle(() => openSystemSetting(setting))) : null));
+}
+function formField(label, input, hint = '') {
+  const id = input.getAttribute('id') || `field-${++formField.sequence}`;
+  input.setAttribute('id', id);
+  return el('div', { class: 'form-field' }, el('label', { for: id }, label), input, hint ? el('p', { class: 'field-hint' }, hint) : null);
+}
+formField.sequence = 0;
+function values(value) { return Array.isArray(value) ? value.map(item => typeof item === 'object' ? item.address || item.ipAddress || item.name || '' : item).filter(Boolean).join(', ') || '—' : value || '—'; }
+async function openSystemSetting(id) {
+  const result = await api('/api/settings/open', { method: 'POST', body: { id, confirmed: true } });
+  toast(result.message || 'Opened Windows settings.');
+}
+async function reviewNetwork(body, title) {
+  const plan = await api('/api/network/plan', { method: 'POST', body });
+  const adapter = state.network?.adapters?.find(item => item.id === body.adapterId);
+  const details = [['Adapter', adapter?.name || body.adapterId], ['Action', title]];
+  if (body.profile) details.push(['Saved network', body.profile]);
+  if (body.action === 'dns') details.push(['DNS servers', body.dns === null ? 'Automatic (DHCP)' : values(body.dns)]);
+  openModal(title, el('div', {}, el('div', { class: 'review-details' }, definition(details)),
+    notice(plan.warning || 'Changing network settings may interrupt connections, downloads, and remote sessions.', 'warning'),
+    el('p', { class: 'muted-caption' }, 'Review these settings before applying them. System permissions may be required.')),
+    { confirmText: 'Apply network change', onConfirm: () => launchJob('/api/network/execute', { planId: plan.id, confirmed: true }, title, async () => {
+      state.network = await api('/api/network'); if (state.screen === 'network') renderNetwork();
+    }, 'network') });
+}
+function reviewDns(adapter) {
+  const mode = el('select', {}, el('option', { value: 'automatic' }, 'Automatic - use network DNS'), el('option', { value: 'manual' }, 'Custom DNS servers'));
+  const servers = el('input', { type: 'text', placeholder: '1.1.1.1, 8.8.8.8', 'aria-label': 'DNS server addresses', disabled: true });
+  mode.addEventListener('change', () => { servers.disabled = mode.value !== 'manual'; if (!servers.disabled) servers.focus(); });
+  openModal('Configure DNS', el('div', {}, el('div', { class: 'review-details' }, definition([['Adapter', adapter.name], ['Current DNS', values(adapter.dns)]])),
+    formField('DNS mode', mode), formField('DNS servers', servers, 'For custom DNS, enter IPv4 addresses separated by commas.')),
+    { confirmText: 'Review change', onConfirm: async () => {
+      const dns = mode.value === 'manual' ? servers.value.split(/[\s,;]+/).filter(Boolean) : null;
+      if (dns && !dns.length) throw new Error('Enter at least one DNS server address.');
+      await reviewNetwork({ action: 'dns', adapterId: adapter.id, dns }, 'Change DNS settings');
+    } });
+}
+function reviewWifiPassword(profile) {
+  openModal('View saved Wi-Fi password?', el('div', {}, el('div', { class: 'review-details' }, definition([['Network', profile.name], ['Adapter', profile.interfaceName || profile.adapterId]])),
+    notice('This is a saved credential on your computer. It will be shown only in this dialog and cleared when you close it or change views.', 'warning', 'shield')),
+    { confirmText: 'Load saved password', onConfirm: async () => {
+      const reviewRevision = modalRevision;
+      const result = await api('/api/network/password', { method: 'POST', body: { profile: profile.name, adapterId: profile.adapterId, confirmed: true } });
+      if (reviewRevision !== modalRevision || !modal.open) { result.password = ''; return; }
+      const password = el('input', { type: 'password', autocomplete: 'off', readonly: true, 'aria-label': 'Saved Wi-Fi password' });
+      password.value = result.password || '';
+      result.password = '';
+      const reveal = button('Show password', 'search', () => {
+        const show = password.type === 'password' || password.getAttribute('type') === 'password';
+        password.type = show ? 'text' : 'password'; password.setAttribute('type', password.type);
+        reveal.textContent = show ? 'Hide password' : 'Show password';
+      });
+      openModal('Saved Wi-Fi password', el('div', {}, el('p', {}, profile.name), formField('Password', password),
+        el('div', { class: 'button-row section-space' }, reveal), el('p', { class: 'muted-caption' }, 'The password is not written to your activity log. Close this dialog to clear it.')));
+      sensitiveCleanup = () => { password.value = ''; password.type = 'password'; password.setAttribute('type', 'password'); };
+    } });
+}
+function renderNetwork() {
+  const data = state.network || {};
+  const header = heading('Network', 'Manage saved Wi-Fi connections, inspect adapters, and configure DNS.', [button('Windows network settings', 'external', handle(() => openSystemSetting('network'))), button('Refresh', 'refresh', () => navigate('network'))], 'System controls');
+  if (data.available === false) { setPage(header, controlUnavailable('Network controls are unavailable', data)); return; }
+  const adapters = data.adapters || [];
+  const adapterRows = adapters.map(adapter => el('tr', {},
+    el('td', {}, el('div', { class: 'cell-name' }, icon(adapter.wifi ? 'wifi' : 'network'), el('strong', {}, adapter.name)), el('p', { class: 'candidate-reason' }, adapter.description || adapter.id)),
+    el('td', {}, badge(adapter.status || 'Unknown', /^(up|connected)$/i.test(adapter.status || '') ? 'good' : '')),
+    el('td', { class: 'mono' }, values(adapter.addresses)), el('td', { class: 'mono' }, values(adapter.dns)),
+    el('td', {}, el('div', { class: 'row-actions' }, button('Details', 'info', () => openModal(adapter.name, el('div', { class: 'review-details' }, definition([
+      ['Status', adapter.status], ['IPv4 / IPv6', values(adapter.addresses)], ['Gateway', values(adapter.gateway)], ['IPv4 DNS', values(adapter.dns)], ['IPv6 DNS', values(adapter.dnsIpv6)], ['DHCP', adapter.dhcp === true ? 'Automatic' : adapter.dhcp === false ? 'Manual' : 'Not reported'], ['Connection', adapter.profile || '—'],
+    ]))), 'small'), button('DNS', 'settings', () => reviewDns(adapter), 'small', { disabled: !!state.activeJob }),
+    adapter.wifi && /^(up|connected)$/i.test(adapter.status || '') ? button('Disconnect', 'close', handle(() => reviewNetwork({ action: 'disconnect', adapterId: adapter.id }, 'Disconnect Wi-Fi')), 'small', { disabled: !!state.activeJob }) : null))));
+  const profiles = data.profiles || [];
+  const profilesTable = profiles.length ? table(['Saved network', 'Adapter', 'Actions'], profiles.map(profile => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('wifi'), profile.name)), el('td', {}, profile.interfaceName || adapters.find(adapter => adapter.id === profile.adapterId)?.name || 'Wi-Fi'), el('td', {}, el('div', { class: 'row-actions' }, button('Connect', 'wifi', handle(() => reviewNetwork({ action: 'connect', adapterId: profile.adapterId, profile: profile.name }, 'Connect to saved Wi-Fi')), 'small', { disabled: !!state.activeJob }), button('Saved password', 'shield', () => reviewWifiPassword(profile), 'small')))))) : el('section', { class: 'panel' }, empty('No saved Wi-Fi networks', 'Use Windows network settings to join a new network. Saved profiles will appear here after refreshing.', 'wifi', null, true));
+  setPage(header, data.warning ? notice(data.warning, 'warning') : null, (data.warnings || []).map(warning => notice(warning, 'warning')),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Network adapters'), el('span', { class: 'subtle' }, `${adapters.length} adapters`)),
+    adapters.length ? table(['Adapter', 'Status', 'IP addresses', 'DNS servers', 'Actions'], adapterRows) : el('section', { class: 'panel' }, empty('No adapters reported', 'Refresh or open Windows network settings to inspect your connection.', 'network', null, true)),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Saved Wi-Fi networks'), el('span', { class: 'subtle' }, 'Only profiles already saved on this computer')),
+    profilesTable, el('p', { class: 'muted-caption' }, 'For a new Wi-Fi network or manual IP/gateway assignment, open Windows network settings. Network changes are reviewed before they run.'));
+}
+function renderAudio() {
+  const data = state.audio || {};
+  const header = heading('Sound', 'Adjust your default output volume and inspect connected audio devices.', [button('Windows sound settings', 'external', handle(() => openSystemSetting('sound'))), button('Refresh', 'refresh', () => navigate('audio'))], 'System controls');
+  if (data.available === false) { setPage(header, controlUnavailable('Audio controls are unavailable', data)); return; }
+  const volume = el('input', { type: 'range', min: 0, max: 100, step: 1, value: Number(data.volume || 0), 'aria-label': 'Output volume' });
+  const output = el('output', { class: 'volume-value' }, `${Math.round(Number(data.volume || 0))}%`);
+  volume.addEventListener('input', () => { output.textContent = `${volume.value}%`; });
+  const apply = button('Apply volume', 'check', handle(async () => {
+    apply.disabled = true;
+    try { const result = await api('/api/audio', { method: 'POST', body: { volume: Number(volume.value), confirmed: true } }); toast(result.message || 'Volume updated.'); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
+    finally { apply.disabled = false; }
+  }), 'primary');
+  const mute = button(data.muted ? 'Unmute output' : 'Mute output', 'audio', handle(async () => {
+    mute.disabled = true;
+    try { const result = await api('/api/audio', { method: 'POST', body: { muted: !data.muted, confirmed: true } }); toast(result.message || (data.muted ? 'Output unmuted.' : 'Output muted.')); state.audio = await api('/api/audio'); if (state.screen === 'audio') renderAudio(); }
+    finally { mute.disabled = false; }
+  }));
+  const devices = data.devices || [];
+  setPage(header, data.warning ? notice(data.warning, 'warning') : null,
+    panel('Default output', data.defaultDevice || 'Volume changes apply to the current default playback device.', el('div', { class: 'audio-control' }, el('div', { class: 'volume-control' }, icon('audio'), volume, output), el('div', { class: 'button-row' }, apply, mute), el('p', { class: 'field-hint' }, 'Drag the slider, then apply. Muting preserves your volume level.')), badge(data.muted ? 'Muted' : 'Sound on', data.muted ? 'warn' : 'good')),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Audio devices'), textButton('Choose input or output in Windows', handle(() => openSystemSetting('sound')), 'external')),
+    devices.length ? table(['Device', 'Type', 'Status'], devices.map(device => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('audio'), device.name)), el('td', {}, /input|capture|record/i.test(device.kind) ? 'Input / microphone' : 'Output / speakers'), el('td', {}, device.isDefault ? badge('Default', 'good') : device.status || 'Available')))) : el('section', { class: 'panel' }, empty('No audio devices reported', 'Windows sound settings can show disconnected devices and device permissions.', 'audio', null, true)));
+}
+function securityState(value, enabled = 'On', disabled = 'Off') { return value === true ? badge(enabled, 'good') : value === false ? badge(disabled, 'bad') : badge('Not reported'); }
+async function reviewSecurityScan(type, path) {
+  const plan = await api('/api/security/plan', { method: 'POST', body: { type, ...(path ? { path } : {}) } });
+  openModal(plan.title || `${type[0].toUpperCase() + type.slice(1)} scan`, el('div', {}, el('div', { class: 'review-details' }, definition([['Engine', 'Microsoft Defender'], ['Scan', type], ...(path ? [['Folder', path]] : [])])),
+    notice(plan.warning || 'A scan can use significant disk and CPU resources. Defender manages detection and remediation using your Windows security policy.'),
+    el('p', { class: 'muted-caption' }, 'Jarvis reports Defender status and output. Stopping monitoring may leave the Defender scan running.')),
+    { confirmText: 'Start Defender scan', onConfirm: () => launchJob('/api/security/scan', { planId: plan.id, confirmed: true }, plan.title || 'Microsoft Defender scan', async () => {
+      state.security = await api('/api/security'); if (state.screen === 'security') renderSecurity();
+    }, 'security-scan') });
+}
+function customSecurityScan() {
+  const path = el('input', { type: 'text', value: state.root, placeholder: 'C:\\Users\\YourName\\Downloads', 'aria-label': 'Folder to scan' });
+  openModal('Scan a folder', el('div', {}, formField('Folder path', path, 'Use an absolute folder path on this computer.')),
+    { confirmText: 'Review scan', onConfirm: async () => { if (!path.value.trim()) throw new Error('Enter a folder to scan.'); await reviewSecurityScan('custom', path.value.trim()); } });
+}
+function renderSecurity() {
+  const data = state.security || {};
+  const header = heading('Security', 'Run Microsoft Defender scans and review protection status reported by Windows.', [button('Open Windows Security', 'external', handle(() => openSystemSetting('security'))), button('Refresh', 'refresh', () => navigate('security'))], 'System controls');
+  if (data.available === false) { setPage(header, controlUnavailable('Microsoft Defender is unavailable', data)); return; }
+  const detections = data.detections || [];
+  const active = state.activeJob?.kind === 'security-scan';
+  const disabled = data.canScan === false || !!state.activeJob;
+  const scanStatus = typeof data.scanStatus === 'object' ? data.scanStatus?.status || data.scanStatus?.message || 'Not reported' : data.scanStatus || 'Not reported';
+  const scan = (title, description, onClick) => el('div', { class: 'setting-row' }, el('span', { class: 'control-symbol' }, icon('shield')), el('div', { class: 'setting-copy' }, el('h3', {}, title), el('p', {}, description)), button(active ? 'Scan running' : 'Review scan', 'play', handle(onClick), 'small', { disabled }));
+  setPage(header, (data.warnings || []).map(warning => notice(warning, 'warning')),
+    el('section', { class: 'panel status-strip' }, el('div', {}, el('span', {}, 'Antivirus'), securityState(data.enabled, 'Enabled', 'Disabled')), el('div', {}, el('span', {}, 'Real-time protection'), securityState(data.realtimeEnabled)), el('div', {}, el('span', {}, 'Definitions updated'), el('strong', {}, timestamp(data.definitionsUpdated))), el('div', {}, el('span', {}, 'Scan status'), el('strong', {}, scanStatus))),
+    active ? el('div', { class: 'scan-progress' }, el('span', { class: 'spinner' }), el('div', {}, el('strong', {}, 'Monitoring Microsoft Defender...'), el('p', {}, 'Progress is shown when the scan engine reports it. No percentage is estimated.')), button('Stop monitoring', 'close', handle(cancelJob), 'small')) : null,
+    data.canScan === false ? notice(data.scanUnavailableReason || 'Scanning is unavailable with the current Windows permissions or Defender configuration.', 'warning') : null,
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Start a scan'), el('span', { class: 'subtle' }, 'Microsoft Defender engine')),
+    el('section', { class: 'panel settings-list' }, scan('Quick scan', 'Scan common locations where threats are found.', () => reviewSecurityScan('quick')), scan('Full scan', 'Scan files and running programs across the computer. This can take a long time.', () => reviewSecurityScan('full')), scan('Custom scan', 'Choose a specific folder to scan.', customSecurityScan)),
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Detection history'), el('span', { class: 'subtle' }, 'Reported by Microsoft Defender')),
+    detections.length ? table(['Detection', 'Severity', 'Status', 'When', 'Details'], detections.map(item => el('tr', {}, el('td', {}, item.name || item.id || 'Detected threat'), el('td', {}, String(item.severity || 'Not reported')), el('td', {}, badge(item.active ? 'Active' : item.actionSuccess ? 'Action succeeded' : 'Review in Windows', item.active ? 'bad' : item.actionSuccess ? 'good' : 'warn')), el('td', { class: 'nowrap' }, timestamp(item.detectedAt)), el('td', {}, button('Details', 'info', () => openModal('Detection details', el('div', {}, definition([['Name', item.name], ['Severity', item.severity], ['Detected', timestamp(item.detectedAt)]]), el('ul', { class: 'review-list' }, (item.resources || []).map(resource => el('li', {}, resource))), button('Open Windows Security', 'external', handle(() => openSystemSetting('security'))))), 'small'))))) : el('section', { class: 'panel' }, empty('No detection history reported', 'This is the history returned by Defender, not a guarantee that the computer is threat-free. Run a scan or inspect Windows Security for more detail.', 'shield', null, true)),
+    el('p', { class: 'muted-caption' }, 'Jarvis uses Windows security tools. It does not replace an antivirus engine or change your protection policy.'));
+}
+function renderSettings() {
+  const data = state.settings || {};
+  const header = heading('System settings', 'Useful Windows controls and direct paths to the settings you use most.', [button('Refresh', 'refresh', () => navigate('settings'))], 'System controls');
+  if (data.available === false) { setPage(header, controlUnavailable('Windows controls are unavailable', data)); return; }
+  const items = data.items || [];
+  const plans = data.powerPlans || [];
+  const planSelect = el('select', { 'aria-label': 'Power plan' }, plans.map(plan => el('option', { value: plan.id, selected: !!plan.active }, plan.name)));
+  const apply = button('Review power plan', 'check', handle(async () => {
+    const selected = plans.find(plan => plan.id === planSelect.value);
+    if (!selected) throw new Error('Choose an available power plan.');
+    const plan = await api('/api/settings/plan', { method: 'POST', body: { action: 'power-plan', id: selected.id } });
+    openModal('Change power plan?', el('div', {}, el('div', { class: 'review-details' }, definition([['Power plan', selected.name]])), notice(plan.warning || 'Power plans affect battery life, performance, and sleep behavior.')),
+      { confirmText: 'Apply power plan', onConfirm: () => launchJob('/api/settings/execute', { planId: plan.id, confirmed: true }, 'Change power plan', async () => { state.settings = await api('/api/settings'); if (state.screen === 'settings') renderSettings(); }, 'settings') });
+  }), 'primary', { disabled: !!state.activeJob });
+  setPage(header, plans.length ? panel('Power plan', 'Choose an existing Windows power plan.', el('div', { class: 'inline-form' }, formField('Active plan', planSelect), apply)) : data.powerPlanError ? notice(data.powerPlanError, 'warning') : null,
+    el('div', { class: 'section-caption' }, el('h2', {}, 'Windows settings'), el('span', { class: 'subtle' }, 'Opens the system settings app')),
+    el('section', { class: 'panel settings-list' }, items.filter(item => item.available !== false).map(item => el('div', { class: 'setting-row' }, el('span', { class: 'control-symbol' }, icon(({ sound: 'audio', network: 'wifi', security: 'shield', storage: 'drive', apps: 'box', updates: 'refresh' })[item.id] || 'settings')), el('div', { class: 'setting-copy' }, el('h3', {}, item.title), el('p', {}, item.description)), button('Open settings', 'external', handle(() => openSystemSetting(item.id)), 'small')))),
+    el('p', { class: 'muted-caption' }, 'These shortcuts open Windows settings. Changes there are managed by Windows; they do not apply automatically.'));
+}
+
 function renderPorts() {
   const data = state.ports || { ports: [] }; const rows = el('tbody'); const summary = el('span');
   const fill = () => {
@@ -467,14 +712,14 @@ function renderPorts() {
     if (!items.length) rows.append(el('tr', {}, el('td', { colspan: 5 }, empty('No matching listeners', state.portFilter ? 'Try a different port, process ID, or address.' : 'No listeners were reported by the system.', 'network', null, true))));
     summary.textContent = `${number(items.length)} local endpoints`;
   }; fill();
-  setPage(heading('Who’s listening?', 'Find what is using a port before starting your next server.', [button('Refresh', 'refresh', () => navigate('ports'))], 'Ports & connections'), data.warning ? notice(data.warning, 'warning') : null,
+  setPage(heading('Ports & connections', 'Find what is using a port before starting your next server.', [button('Refresh', 'refresh', () => navigate('ports'))], 'Ports & connections'), data.warning ? notice(data.warning, 'warning') : null,
     el('div', { class: 'toolbar' }, searchField('Search port, PID, or address…', state.portFilter, value => { state.portFilter = value; fill(); }), badge('LOCAL ENDPOINTS', '', 'shield')),
     el('section', { class: 'panel' }, el('div', { class: 'table-wrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Port', 'Protocol', 'Address', 'PID', 'Process'].map(value => el('th', {}, value)))), rows)), el('div', { class: 'table-end' }, summary, el('span', {}, 'TCP listeners + bound UDP sockets'))), el('p', { class: 'muted-caption' }, 'A listening port is not necessarily reachable from the internet. Process details depend on your operating-system permissions.'));
 }
 
 function renderScripts() {
   const scripts = Array.isArray(state.scripts) ? state.scripts : [];
-  setPage(heading('Your project, one click closer.', 'Named commands from this folder’s package.json. Review the command, then run it.', [button('Refresh', 'refresh', () => navigate('scripts'))], 'Project tasks'), notice('Project scripts can run code and npm lifecycle hooks. Use scripts from projects you trust. Running tasks can be cancelled.'),
+  setPage(heading('Project tasks', 'Named commands from this folder’s package.json. Review the command, then run it.', [button('Refresh', 'refresh', () => navigate('scripts'))], 'Project tasks'), notice('Project scripts can run code and npm lifecycle hooks. Use scripts from projects you trust. Running tasks can be cancelled.'),
     scripts.length ? el('div', { class: 'script-grid' }, scripts.map(script => el('section', { class: 'panel script-card' }, el('div', { class: 'script-card-header' }, icon('terminal'), el('h3', {}, script.name)), el('code', {}, script.command), button('Review & run', 'play', () => reviewScript(script), 'small')))) : el('section', { class: 'panel' }, empty('No project tasks found', 'This view reads scripts from package.json in the selected workspace folder, without searching parent folders.', 'terminal')));
 }
 function reviewScript(script) {
@@ -491,10 +736,10 @@ function renderStorage() {
   const content = el('div');
   const tabs = el('div', { class: 'storage-tabs', role: 'tablist', 'aria-label': 'Storage sections' }, [['overview', 'Storage map'], ['cleanup', 'Review cleanup'], ['recovery', 'Recovery']].map(([id, label]) => el('button', { type: 'button', role: 'tab', 'aria-selected': data.tab === id, class: `storage-tab${data.tab === id ? ' active' : ''}`, onClick: () => { data.tab = id; renderStorage(); } }, label, id === 'cleanup' && data.scan?.cleanupCandidates?.length ? ` (${data.scan.cleanupCandidates.length})` : '')));
   if (data.tab === 'recovery') content.append(renderRecovery());
-  else if (!data.scan) content.append(el('section', { class: 'panel' }, empty('Space makes more sense when you can see it.', 'Choose your workspace, a folder, or a drive. We’ll map file sizes and identify eligible old temporary files for your review.', 'drive')));
+  else if (!data.scan) content.append(el('section', { class: 'panel' }, empty('Analyze a folder or drive', 'Choose your workspace, a folder, or a drive. We’ll map file sizes and identify eligible old temporary files for your review.', 'drive')));
   else if (data.tab === 'cleanup') content.append(renderCleanup());
   else content.append(renderStorageMap());
-  setPage(heading('Make room for what matters.', 'A clearer view of your computer’s storage. A careful way to clean it up.', [button('Recovery', 'undo', () => { data.tab = 'recovery'; renderStorage(); })], 'Storage & cleanup'), scope,
+  setPage(heading('Storage', 'Inspect disk usage and review old temporary files before cleanup.', [button('Recovery', 'undo', () => { data.tab = 'recovery'; renderStorage(); })], 'Storage & cleanup'), scope,
     state.activeJob?.kind === 'scan' ? el('div', { class: 'scan-progress' }, el('span', { class: 'spinner' }), el('div', {}, el('strong', {}, 'Building your storage map…'), el('p', {}, 'Large drives take a little longer. Inaccessible folders are skipped.'), el('div', { class: 'progress-track' })), button('Cancel scan', 'close', handle(cancelJob), 'small')) : null,
     data.stale ? notice('Files changed after this scan. Analyze storage again for current sizes and cleanup candidates.', 'warning') : null,
     tabs, content);
@@ -603,23 +848,25 @@ function renderActivity() {
   const fill = status => {
     filters.replaceChildren(...[['all', 'All activity'], ['completed', 'Completed'], ['failed', 'Needs attention']].map(([key, label]) => el('button', { type: 'button', class: `filter-chip${status === key ? ' active' : ''}`, onClick: () => fill(key) }, label)));
     const items = records.filter(item => status === 'all' || (status === 'completed' ? ['completed', 'success', 'succeeded'].includes(item.status) : ['failed', 'error', 'cancelled'].includes(item.status)));
-    content.replaceChildren(items.length ? table(['Action', 'Result', 'When', ''], items.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('activity'), item.action || 'Local action'), el('p', { class: 'candidate-reason', title: item.target || '' }, item.message || item.target || '')), el('td', {}, badge(item.status || 'Recorded', ['failed', 'error'].includes(item.status) ? 'bad' : ['cancelled', 'running'].includes(item.status) ? 'warn' : 'good')), el('td', { class: 'nowrap' }, timestamp(item.time)), el('td', { class: 'right' }, iconButton('search', 'View activity details', () => openModal('Activity details', el('div', { class: 'review-details' }, definition([['Action', item.action], ['Status', item.status], ['When', timestamp(item.time)], ['Target', item.target], ['Message', item.message]]))))))), `${number(items.length)} recorded actions`) : el('section', { class: 'panel' }, empty('A clear record starts here.', 'Your scans, Git actions, and project tasks will appear here as you use Jarvis.', 'activity')));
+    content.replaceChildren(items.length ? table(['Action', 'Result', 'When', ''], items.map(item => el('tr', {}, el('td', {}, el('div', { class: 'cell-name' }, icon('activity'), actionLabel(item.action)), el('p', { class: 'candidate-reason', title: item.target || '' }, item.message || item.target || '')), el('td', {}, badge(actionLabel(item.status || 'Recorded'), activityTone(item.status))), el('td', { class: 'nowrap' }, timestamp(item.time)), el('td', { class: 'right' }, iconButton('search', 'View activity details', () => openModal('Activity details', el('div', { class: 'review-details' }, definition([['Action', item.action], ['Status', item.status], ['When', timestamp(item.time)], ['Target', item.target], ['Message', item.message]]))))))), `${number(items.length)} recorded actions`) : el('section', { class: 'panel' }, empty('A clear record starts here.', 'Your scans, Git actions, and project tasks will appear here as you use Jarvis.', 'activity')));
   };
   fill('all');
-  setPage(heading('A little history. A lot of clarity.', 'See what ran, what changed, and what needs another look.', [button('Refresh', 'refresh', () => navigate('activity'))], 'Activity'), filters, content);
+  setPage(heading('Activity log', 'See what ran, what changed, and what needs another look.', [button('Refresh', 'refresh', () => navigate('activity'))], 'Activity'), filters, content);
 }
 
-function openModal(title, content, { subtitle = '', wide = false, confirmText = null, onConfirm = null, danger = false } = {}) {
+function openModal(title, content, { subtitle = '', wide = false, confirmText = null, onConfirm = null, danger = false, confirmIcon = null } = {}) {
+  clearSensitive();
   if (modal.open) modal.close();
+  const revision = ++modalRevision;
   delete modal.dataset.job;
   modal.className = `modal${wide ? ' wide' : ''}`;
   const errors = el('div');
   const body = el('div', { class: 'modal-body' }, content, errors);
   const footer = el('div', { class: 'modal-footer' }, button(confirmText ? 'Cancel' : 'Done', null, () => modal.close()));
   if (confirmText) {
-    const confirm = button(confirmText, danger ? 'trash' : 'check', async () => {
+    const confirm = button(confirmText, confirmIcon || (danger ? 'trash' : 'check'), async () => {
       confirm.disabled = true; errors.replaceChildren();
-      try { await onConfirm?.(); modal.close(); }
+      try { await onConfirm?.(); if (revision === modalRevision) modal.close(); }
       catch (error) { errors.append(el('div', { class: 'modal-error', role: 'alert' }, error.message)); }
       finally { confirm.disabled = false; }
     }, danger ? 'danger' : 'primary');
@@ -629,6 +876,8 @@ function openModal(title, content, { subtitle = '', wide = false, confirmText = 
   modal.showModal();
 }
 function openPalette() {
+  ++modalRevision;
+  clearSensitive();
   if (modal.open) modal.close();
   modal.className = 'modal';
   const list = el('div', { class: 'palette-results' });
@@ -640,7 +889,7 @@ function openPalette() {
     if (!matches.length) list.append(empty('No tool matches yet', 'Try files, search, storage, or Git.', 'search', null, true));
   };
   const input = el('input', {
-    class: 'palette-input', type: 'search', placeholder: 'What would you like to do?', 'aria-label': 'Find a tool or action',
+    class: 'palette-input', type: 'search', placeholder: 'Workspace tools', 'aria-label': 'Find a tool or action',
     onInput: event => fill(event.target.value),
     onKeydown: event => {
       if (!['ArrowDown', 'Enter'].includes(event.key)) return;
@@ -659,7 +908,7 @@ async function openToolbox(category = '') {
   if (!state.recipes.length) state.recipes = await api('/api/recipes');
   const recipes = category ? state.recipes.filter(recipe => recipe.category === category) : state.recipes;
   const content = el('div', { class: 'recipe-grid' }, recipes.map(recipe => el('button', { type: 'button', class: 'recipe-card', onClick: () => showRecipe(recipe) }, el('small', {}, recipe.category), el('h3', {}, recipe.title), el('p', {}, recipe.description))));
-  openModal(category ? `${category} made simpler` : 'Start with what you want to do.', content, { subtitle: 'Practical recipes, useful tools, and a little less guesswork.', wide: true });
+  openModal(category ? `${category} made simpler` : 'Command reference', content, { subtitle: 'Practical recipes, useful tools, and a little less guesswork.', wide: true });
 }
 function showRecipe(recipe) {
   const content = el('div', {}, el('p', {}, recipe.explanation), (recipe.examples || []).map(example => el('div', { class: 'example-block' }, el('code', {}, example.command), el('p', {}, example.explanation))));
@@ -676,17 +925,22 @@ async function copy(value) {
 }
 async function openAbout() {
   const about = await api('/api/about'); state.about = about;
-  const content = el('div', {}, el('div', { class: 'about-heading' }, el('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'j', el('span', {}, '›')), el('div', {}, el('h3', {}, about.name || 'Jarvis Workbench'), el('p', {}, `${about.version ? `Version ${about.version}` : 'Your local workbench'}${about.author ? ` · By ${typeof about.author === 'string' ? about.author : about.author.name || ''}` : ''}`))), el('p', {}, 'A calmer way to work with your computer. Files, search, Git, storage, and project tasks — close at hand, running locally.'), notice('No API key, cloud account, or telemetry. Your browser connects to a local server on this computer.', '', 'shield'));
-  if (about.donations) {
-    const fields = [['accountHolder', 'Account holder'], ['accountNumber', 'Account number'], ['ifsc', 'IFSC'], ['upi', 'UPI ID']].filter(([key]) => typeof about.donations[key] === 'string' && about.donations[key].trim());
-    const placeholder = value => /^(?:YOUR[_ -]|PLACEHOLDER|TODO|TBD|<)/i.test(String(value || '').trim());
-    const unconfigured = fields.some(([key]) => placeholder(about.donations[key]));
-    if (fields.length) content.append(el('hr', { class: 'soft-divider' }), el('h3', {}, 'Support independent development'), el('p', { class: 'muted-caption' }, unconfigured ? 'Donation details are not configured yet. The author’s account fields below are placeholders, so payments are not available.' : 'Public donation details shared by the author. Contributions are optional.'), el('div', { class: 'donation-fields' }, fields.map(([key, label]) => el('div', { class: 'donation-field' }, el('div', {}, el('small', {}, label), el('strong', {}, placeholder(about.donations[key]) ? 'Not configured' : about.donations[key])), placeholder(about.donations[key]) || unconfigured ? badge('Not available') : iconButton('copy', `Copy ${label.toLowerCase()}`, handle(() => copy(about.donations[key])))))));
-    if (about.donations.paymentUrl && !unconfigured && !placeholder(about.donations.paymentUrl)) {
-      try { const url = new URL(about.donations.paymentUrl); if (url.protocol === 'https:') content.append(el('a', { class: 'button soft section-space', href: url.href, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Open author’s support page')); } catch { /* Invalid donation URLs are not links. */ }
-    }
-  } else content.append(el('p', { class: 'muted-caption' }, 'Thanks for trying Jarvis. Author support details have not been configured for this build.'));
-  openModal('Built to make work feel simpler.', content);
+  const author = typeof about.author === 'string' ? about.author : about.author?.name || 'Ashish';
+  const donation = about.donations || {};
+  const configured = value => typeof value === 'string' && value.trim() && !/^(?:YOUR[_ -]|PLACEHOLDER|TODO|TBD|<)/i.test(value.trim());
+  const fields = [['accountNumber', 'Account number'], ['ifsc', 'IFSC'], ['upi', 'UPI ID']].filter(([key]) => configured(donation[key]));
+  let supportLink = null;
+  try { const url = new URL(donation.paymentUrl); if (url.protocol === 'https:' && configured(donation.paymentUrl)) supportLink = url.href; } catch { /* Unconfigured donation link. */ }
+  const content = el('div', {}, el('div', { class: 'about-heading' }, el('span', { class: 'brand-mark', 'aria-hidden': 'true' }, 'j', el('span', {}, '›')), el('div', {}, el('h3', {}, about.name || 'Jarvis Workbench'), el('p', {}, `${about.version ? `Version ${about.version} · ` : ''}Created by ${author}`))),
+    el('p', {}, 'Free, open-source tools for your files, terminal, and computer. Jarvis runs locally and needs no API key.'),
+    el('section', { class: 'support-panel' }, el('div', { class: 'support-title' }, icon('heart'), el('h3', {}, 'Support Ashish')),
+      el('p', {}, 'If Jarvis makes your work easier, you can help support its development. Donations are optional.'),
+      el('p', { class: 'support-owner' }, 'Account holder: ', el('strong', {}, configured(donation.accountHolder) ? donation.accountHolder : 'Ashish')),
+      fields.length || supportLink ? el('div', {}, fields.length ? el('div', { class: 'donation-fields' }, fields.map(([key, label]) => el('div', { class: 'donation-field' }, el('div', {}, el('small', {}, label), el('strong', {}, donation[key])), iconButton('copy', `Copy ${label.toLowerCase()}`, handle(() => copy(donation[key])))))) : null,
+        supportLink ? el('a', { class: 'button primary section-space', href: supportLink, target: '_blank', rel: 'noopener noreferrer' }, icon('external'), 'Support this project') : null)
+        : el('p', { class: 'support-coming' }, icon('clock'), 'Donation details coming soon.')),
+    notice('Your browser connects directly to Jarvis on this computer. Files and system controls stay local.', '', 'shield'));
+  openModal('About & support', content);
 }
 
 async function launchAction(action, fields, title) {
@@ -711,7 +965,9 @@ async function pollJob(job) {
     if (state.activeJob?.id === job.id) state.activeJob = null;
     if (job.status === 'completed') {
       if (job.result?.code && job.result.code !== 0) toast(`${job.title} finished with exit code ${job.result.code}.`, true);
-      else if (jobWarnings(job).length) toast('Task finished with notes. Open Details to review them.', true);
+      else if (job.kind === 'process-stop' && job.result?.status === 'requested') toast(job.result.message || 'Stop requested; the process has not exited yet.', 'warning');
+      else if (jobWarnings(job).length) toast('Task finished with notes. Open Details to review them.', 'warning');
+      else if (job.result?.message) toast(job.result.message);
       else toast('Task completed.');
       await job.onDone?.(job.result);
     } else if (job.status === 'failed') {
@@ -719,7 +975,7 @@ async function pollJob(job) {
       if (job.kind !== 'scan' || job.result) await job.onDone?.(job.result);
     }
     else if (job.status === 'cancelled') {
-      toast(job.result ? 'Task cancelled. Partial results are available.' : 'Task cancelled.');
+      toast(job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : job.result ? 'Task cancelled. Partial results are available.' : 'Task cancelled.', job.result?.scanMayContinue ? 'warning' : false);
       if (job.kind !== 'scan' || job.result) await job.onDone?.(job.result);
     }
     if (state.screen === 'storage') renderStorage();
@@ -733,23 +989,23 @@ async function cancelJob() {
   const job = state.activeJob;
   if (!job) return;
   await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST', body: {} });
-  toast('Cancellation requested.');
+  toast(job.kind === 'security-scan' ? 'Stop monitoring requested. Microsoft Defender may continue scanning.' : 'Cancellation requested.');
 }
 function renderJobDock(job) {
   const dock = $('#job-dock'); dock.hidden = false;
   const running = ['running', 'queued'].includes(job.status);
   const warnings = jobWarnings(job);
-  const message = job.connectionError || (running ? `Working locally · ${duration((Date.now() - new Date(job.startedAt).getTime()) / 1000)} elapsed` : job.status === 'failed' ? job.error || 'Open details for the error.' : job.status === 'cancelled' ? 'Cancelled. Any partial results are preserved.' : job.result?.code ? `Finished with exit code ${job.result.code}` : warnings.length ? 'Finished with notes. Review the task details.' : 'Completed on your computer.');
+  const message = job.connectionError || (running ? `Working locally · ${duration((Date.now() - new Date(job.startedAt).getTime()) / 1000)} elapsed` : job.status === 'failed' ? job.error || 'Open details for the error.' : job.status === 'cancelled' ? (job.result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning.' : 'Cancelled. Any partial results are preserved.') : job.result?.code ? `Finished with exit code ${job.result.code}` : job.result?.message ? job.result.message : warnings.length ? 'Finished with notes. Review the task details.' : 'Completed on your computer.');
   dock.replaceChildren(running && !job.connectionError ? el('span', { class: 'spinner' }) : icon(job.status === 'failed' || job.connectionError || warnings.length ? 'alert' : 'check'), el('div', { class: 'job-copy' }, el('strong', {}, job.title), el('p', {}, message)),
     job.connectionError ? button('Reconnect', 'refresh', () => { job.connectionError = ''; void pollJob(job); }, 'small') : button('Details', null, () => openJobModal(job), 'small'),
-    running ? button('Cancel', null, handle(cancelJob), 'small') : iconButton('close', 'Dismiss completed task', () => { dock.hidden = true; }));
+    running ? button(job.kind === 'security-scan' ? 'Stop monitoring' : 'Cancel', null, handle(cancelJob), 'small') : iconButton('close', 'Dismiss completed task', () => { dock.hidden = true; }));
 }
 function openJobModal(job) {
   openModal(job.title, el('div', { id: 'job-modal-content' }), { wide: true });
   modal.dataset.job = job.id; fillJobModal(job);
 }
 function jobWarnings(job) {
-  return [...new Set([...(job.warnings || []), ...(job.activityWarning ? [job.activityWarning] : []), ...(job.result?.errors || []).map(error => typeof error === 'string' ? error : `${error.path || 'File'}: ${error.message || error.error || 'Needs review'}`)].filter(Boolean))];
+  return [...new Set([...(['process-stop', 'network'].includes(job.kind) && job.result?.status === 'requested' ? [job.result.message || 'Stop requested; the process has not exited yet.'] : []), ...(job.result?.scanMayContinue ? ['Microsoft Defender may still be scanning. Check Windows Security for its current status.'] : []), ...(job.warnings || []), ...(job.activityWarning ? [job.activityWarning] : []), ...(job.result?.errors || []).map(error => typeof error === 'string' ? error : `${error.path || 'File'}: ${error.message || error.error || 'Needs review'}`)].filter(Boolean))];
 }
 function fillJobModal(job) {
   const holder = $('#job-modal-content'); if (!holder) return;
@@ -757,10 +1013,12 @@ function fillJobModal(job) {
   const extra = result && (result.stdout || result.stderr) ? [result.stdout || '', result.stderr || ''].filter(Boolean).join('\n') : '';
   const logs = (job.logs || []).join('\n');
   const warnings = jobWarnings(job);
-  replace(holder, el('div', { class: 'preview-toolbar' }, badge(warnings.length ? `${job.status} with notes` : job.status, job.status === 'failed' ? 'bad' : warnings.length ? 'warn' : job.status === 'completed' ? 'good' : 'warn'), el('span', {}, `Started ${timestamp(job.startedAt)}`)), job.error ? notice(job.error, 'error') : null,
+  const resultLabel = job.kind === 'process-stop' && result?.status === 'requested' ? 'Stop requested' : warnings.length ? `${job.status} with notes` : job.status;
+  replace(holder, el('div', { class: 'preview-toolbar' }, badge(resultLabel, job.status === 'failed' ? 'bad' : warnings.length ? 'warn' : job.status === 'completed' ? 'good' : 'warn'), el('span', {}, `Started ${timestamp(job.startedAt)}`)), job.error ? notice(job.error, 'error') : null,
     warnings.map(warning => notice(warning, 'warning')),
+    job.kind === 'process-stop' && result ? el('div', { class: 'review-details' }, definition([['Process', result.name], ['PID', result.pid], ['Result', result.message || result.status]])) : null,
     result && ['movedBytes', 'restoredBytes', 'reclaimedBytes'].some(key => result[key] !== undefined) ? el('div', { class: 'review-details' }, definition([['Moved to recovery', bytes(result.movedBytes || 0)], ['Restored', bytes(result.restoredBytes || 0)], ['Permanently removed', bytes(result.reclaimedBytes || 0)]])) : null,
-    el('pre', { class: 'code-preview' }, logs || extra || (job.status === 'running' ? 'Waiting for task output…' : 'This task produced no console output.')), job.logTruncated ? el('p', { class: 'muted-caption' }, 'Older output was truncated to keep this view responsive.') : null, ['running', 'queued'].includes(job.status) ? button('Cancel task', 'close', handle(cancelJob), 'small section-space') : null);
+    el('pre', { class: 'code-preview' }, logs || extra || (job.status === 'running' ? 'Waiting for task output…' : 'This task produced no console output.')), job.logTruncated ? el('p', { class: 'muted-caption' }, 'Older output was truncated to keep this view responsive.') : null, ['running', 'queued'].includes(job.status) ? button(job.kind === 'security-scan' ? 'Stop monitoring' : 'Cancel task', 'close', handle(cancelJob), 'small section-space') : null);
 }
 
 async function init() {
@@ -777,7 +1035,11 @@ async function init() {
   $('#mobile-command').addEventListener('click', openPalette);
   $('#toolbox-button').addEventListener('click', handle(() => openToolbox()));
   $('#support-button').addEventListener('click', handle(openAbout));
-  modal.addEventListener('close', () => { if (!modal.open) delete modal.dataset.job; });
+  $('#header-support').addEventListener('click', handle(openAbout));
+  $('#footer-support').addEventListener('click', handle(openAbout));
+  modal.addEventListener('close', onModalClose);
+  modal.addEventListener('cancel', clearSensitive);
+  window.addEventListener('pagehide', clearSensitive);
   document.addEventListener('keydown', event => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openPalette(); return; }
     if (event.key === 'Escape' && !modal.open && state.activeJob) { event.preventDefault(); void cancelJob().catch(report); }

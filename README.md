@@ -1,8 +1,8 @@
 # Jarvis Workbench
 
-A local terminal and browser dashboard for finding text, understanding Git, exploring files, and managing storage. Start with the task you want to finish; Jarvis supplies the controls and explains the command-line concepts behind them.
+A local terminal and browser dashboard for finding text, understanding Git, managing files and storage, and controlling Windows networking, sound, security and power. Start with the task you want to finish; Jarvis supplies the controls and explains the command-line concepts behind them.
 
-**Node.js 22 or 24 · Zero npm dependencies · Apache-2.0 · No API key · No telemetry**
+**Version 0.2.0 / Node.js 22 or 24 Â· Zero npm dependencies Â· Apache-2.0 Â· No API key Â· No telemetry**
 
 Created by **Ashish / [Ashishkkb](https://github.com/Ashishkkb)**. This is an independent, open-source project. Voice integration is separate and is not included.
 
@@ -43,7 +43,7 @@ The browser server binds only to `127.0.0.1`. Its launch URL contains a random s
 | Key | Tool | Main actions |
 | --- | --- | --- |
 | `1` | Overview | Workspace, machine, and Git summary. |
-| `2` | Files | Browse folders and preview text or log tails. |
+| `2` | Files | Browse, preview, copy, move, rename, create folders and restore removed items. |
 | `3` | Search | Find phrases, regular expressions, and selected file types. |
 | `4` | Git & upload | Review changes, commit, fetch, push, and pull. |
 | `5` | Processes | Inspect and filter running programs. |
@@ -51,21 +51,49 @@ The browser server binds only to `127.0.0.1`. Its launch URL contains a random s
 | `7` | Storage | Compare folder sizes, choose drive scans, and review cleanup. |
 | `8` | Project tasks | Review and run named npm scripts. |
 | `9` | Toolbox | Choose a practical task and learn its command equivalent. |
+| `0` | Control Center | Windows Wi-Fi, sound, Defender, power plans and settings. |
 
-**Ctrl+P** opens the task palette. **Tab** switches tools; **Up/Down** selects an item; **Enter** opens it; **R** refreshes; **Esc** dismisses a prompt or cancels a task; **Q** exits. **B** opens the browser dashboard and **A** opens activity history.
+**Ctrl+P** opens the task palette. **Tab** switches tools; **Up/Down** selects an item; **Enter** opens it; **R** refreshes; **Esc** dismisses a prompt or cancels a task; **Q** exits. **B** opens the browser dashboard and **A** opens activity history. **$** opens Support/About from any screen.
 
 | Screen | Additional controls |
 | --- | --- |
-| Files | `Backspace`: parent folder. `/`: filter names or search the current preview. `T`: switch a preview to/from its tail. |
+| Files | `Backspace`: parent. `/`: filter/find. `T`: preview tail. `N`: new folder. `C`: copy. `M`: move. `E`: rename. `X`: move to recovery. `H`: restore from file recovery. |
 | Search | `/`: enter a query. `M`: literal/regex. `C`: case matching. `G`: filename glob. |
 | Git | `C`: save a commit. `P`: push. `L`: fast-forward pull. `F`: fetch. |
-| Processes | `/`: filter. `S`: memory/CPU sorting. |
+| Processes | `/`: filter. `S`: memory/CPU sorting. `K`: review and stop the selected process. |
 | Ports | `/`: filter by port, PID, or address. |
 | Storage | `S`: select a workspace, drive, home, or temporary-folder scan. `C`: review eligible cleanup. `H`: recovery history. |
 | Project tasks | `Enter`: review and run the selected script. |
 | Toolbox | `Enter`: open the tool. `E`: explanation and command examples. |
+| Control Center | `Enter`: category actions. `W`: Wi-Fi/network. `V`: sound. `S`: security. `P`: power plan. `O`: Windows Settings. |
 
 Terminal confirmation dialogs require **Y**. Enter, N, or Esc cancels. Use `--ascii` for plain borders or `--no-color` to disable color. Redirected dashboard output produces a static frame; keyboard interaction needs an interactive terminal.
+
+## Windows Control Center
+
+Press **0** in the terminal or use the browser's Network, Sound, Security and Settings screens. These controls use Windows APIs and installed tools. Linux/macOS show an explicit availability message; search, Git, storage and other cross-platform tools continue to work. Missing devices, OS restrictions and permission failures are reported rather than replaced by sample readings.
+
+- **Network:** inspect adapters, addresses and DNS; connect to an existing saved Wi-Fi profile; disconnect Wi-Fi; set one to four IPv4 DNS servers or restore automatic DNS. Each connection/DNS change is reviewed and confirmed, with the adapter checked again before applying it. IPv6 DNS and IP-address configuration are left to Windows Settings. Network changes can interrupt calls, downloads and remote sessions.
+- **Saved Wi-Fi password:** choose one profile, then explicitly confirm disclosure. The terminal hides the password after 45 seconds or Esc. Passwords bypass operation/activity logging. Displaying a secret can expose it to screen sharing, screenshots or terminal recording.
+- **Sound:** adjust the default output's volume and mute state after confirmation. Enumerated devices can be inspected in the browser; switching the default device opens Windows Sound settings instead of using undocumented audio APIs.
+- **Power:** select an existing Windows power plan. Jarvis rechecks the reviewed state, applies the selected plan and verifies the result. Select the former plan again to undo the choice.
+- **Settings:** confirmed shortcuts open Windows Security, updates, storage, installed apps, startup apps, display, sound, network, privacy and power. These open Windows' own interface; they do not silently change settings.
+
+Security shows Microsoft Defender status and recent protection history, including unavailable or unknown readings. Quick, full and custom scans require a separate review. **Defender may quarantine or remove detected threats under the PC's protection policy.** Administrator access may be required; Jarvis never automatically elevates itself.
+
+Scan completion comes from the installed `MpCmdRun` process. Code 0 means no threats were found **or** detections were remediated; code 2 means remediation needs attention or scanning encountered an error. Neither a blank history nor a successful command guarantees a malware-free PC. Open Windows Security to review findings. **Esc / Stop monitoring stops Jarvis monitoring, not the Defender engine.** Monitoring is bounded to eight hours, after which the scan may continue. Jarvis does not send Defender's global cancellation command because it could affect another scan. Custom targets are canonical local files/folders with identity checks before launch.
+
+The implementation follows Microsoft's [Defender command reference](https://learn.microsoft.com/en-us/defender-endpoint/command-line-arguments-microsoft-defender-antivirus), [powercfg reference](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/powercfg-command-line-options) and [Windows Settings URI reference](https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-settings). Defender/Windows policies remain authoritative.
+
+## Reviewed file management
+
+Files supports new folders, copy, move, rename and **move to recovery**, with explicit source/destination review. Destinations must be inside the selected workspace, their parents must exist, and existing entries are never intentionally overwritten. Linked paths, Git metadata, Jarvis runtime files and recovery storage are protected. Reviews are bounded to 20,000 entries or 15 seconds; choose a smaller selection if needed. Plans expire after 60 seconds and recheck the selected files before execution.
+
+Move to recovery keeps the selection recoverable and **does not free disk space**. Use **H** in Files or the browser's file recovery list to restore its original location. This is separate from old temporary-file cleanup under Storage. File recovery offers restore; it has no permanent-delete action. Existing original paths are not overwritten. Keep recovery data and manifests together. Partly completed operations report their errors and remaining destination/recovery information.
+
+File-manager recovery normally lives under the activity data directory in `file-recovery/<workspaceHash>`. For a Windows workspace on another drive, it uses `<drive>\.jarvis-workbench-recovery\<userHash>\<workspaceHash>` so the move remains on the same volume. The store stays outside your project and is protected from file actions.
+
+Windows supports folder moves, renames and recovery. On Linux/macOS these folder operations are unavailable where an atomic no-overwrite directory move cannot be guaranteed; use copy instead. Regular-file actions, folder creation and folder copying remain available. Cross-filesystem moves are rejected; copy first, verify the result, then review moving the original to recovery. Cancellation can leave a reported partial copy if safely removing only Jarvis-created items is impossible.
 
 ## Storage: inspect, review, recover
 
@@ -111,11 +139,15 @@ jarvis locations --json
 jarvis scan --path /path/to/folder --json
 jarvis processes --json
 jarvis ports --json
+jarvis network --json
+jarvis sound --json
+jarvis security --json
+jarvis settings --json
 jarvis doctor
 jarvis --demo --snapshot --screen git --width 110
 ```
 
-`status`, `search`, `files`, `disk`, `locations`, `scan`, `processes`, and `ports` support `--json`. The `disk` command is the quick workspace summary; `locations` lists scan choices and `scan --path folder` performs the longer metadata scan. On Windows, a drive can be selected with `jarvis scan --path C:\ --json`. Recovery actions are available in the dashboards and storage API. `doctor` checks Node, Git, and optional ripgrep. Use `--` before a search phrase that starts with a dash. Run `jarvis --help` for the complete command list.
+`status`, `search`, `files`, `disk`, `locations`, `scan`, `processes`, `ports`, `network`, `sound`, `security`, and `settings` support `--json`. The `disk` command is the quick workspace summary; `locations` lists scan choices and `scan --path folder` performs the longer metadata scan. On Windows, a drive can be selected with `jarvis scan --path C:\ --json`. Recovery actions are available in the dashboards and storage API. `doctor` checks Node, Git, and optional ripgrep. Use `--` before a search phrase that starts with a dash. Run `jarvis --help` for the complete command list.
 
 Before a registry release, ES modules can import the checkout directly:
 
@@ -145,7 +177,8 @@ Storage exports include `listScanLocations`, `scanStorage`, `planCleanup`, `exec
 
 - **Search:** literal and case-insensitive by default, using optional ripgrep or an isolated JavaScript worker. Supports `*`, `?`, and `**` filename globs. Skips binary files, files over 2 MiB, links, `.git`, dependencies, caches, and common build folders. Other hidden files are included; `.gitignore` does not define search scope. Defaults to 250 matching lines and an 8-second budget per backend. Partial results are labeled. Regexes are validated as JavaScript; unsupported native patterns use the fallback.
 - **Previews:** read at most 512 KiB. The library defaults to 160 lines; initial dashboard previews allow up to 1,000. Large tails have no invented absolute line numbers. Following a tail uses refreshed snapshots. Project browsing and previews remain inside the workspace.
-- **Processes/ports:** read-only inspection. Windows CPU values are cumulative seconds; Linux/macOS use percentages. Permissions can hide socket owners. Missing tools produce a readable error; Jarvis does not install system utilities.
+- **Processes:** view and filter running programs, then use **K** in the terminal or **Stop** in the browser to review the exact name, PID, owner, and start time before confirming. Only eligible processes owned by the current user can be stopped; Jarvis, its ancestors, and protected system processes are refused. Windows termination is immediate and can lose unsaved work. Linux/macOS send SIGTERM; a program can ignore it, in which case Jarvis reports that the request was sent and the process is still running. No force escalation or process-tree termination occurs. A reviewed identity expires after 60 seconds and is rechecked before use. Demo mode never stops a real process.
+- **Ports:** read-only inspection. Windows CPU values are cumulative seconds; Linux/macOS use percentages. Permissions can hide socket owners. Missing tools produce a readable error; Jarvis does not install system utilities.
 - **Project tasks:** reads the workspace's `package.json`. Confirming a script runs project code and npm lifecycle hooks with your environment. Output is bounded to 256 KiB, and Esc cancels the process tree. Use a normal terminal for programs that require interactive input.
 
 ## Activity and privacy
@@ -173,6 +206,6 @@ npm pack --dry-run
 
 Tests use temporary fixtures. CI is configured for Node 22 and 24 on Windows, Ubuntu, and macOS. A configured matrix is not a claim that a hosted run has already passed; verify those results before publishing a release. `npm pack` creates a local archive and does not publish it. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The About view credits Ashish / Ashishkkb. Donation information is **not configured**. `support.json` contains the placeholder; the owner may later add verified bank, UPI, or HTTPS payment details. No payment destination is supplied or activated by default.
+The About view and persistent **$ Support** shortcut credit Ashish / Ashishkkb. `support.json` names account holder **Ashish** and includes `YOUR_ACCOUNT_NUMBER` and `YOUR_IFSC_CODE` placeholders. These are not usable payment instructions. Replace them with verified public donation details before accepting donations.
 
 Licensed under [Apache-2.0](LICENSE).

@@ -13,6 +13,8 @@ import { clean, friendlyError, safeRemote } from './format.js';
 import { ActivityLog } from './activity.js';
 import { getAbout } from './about.js';
 import * as storageFunctions from './storage.js';
+import * as processFunctions from './process-control.js';
+import { createControlApi } from './control-api.js';
 
 const BODY_LIMIT = 64 * 1024;
 const LOG_LIMIT = 256 * 1024;
@@ -92,7 +94,7 @@ function readJson(req) {
 }
 
 /** Start a loopback-only browser dashboard. No project commands run at startup. */
-export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage } = {}) {
+export async function startServer({ root = process.cwd(), port = 0, host = '127.0.0.1', demo = false, activity, storage, processControl, network, audio, security, settings, fileActions } = {}) {
   if (host !== '127.0.0.1') throw new Error('The dashboard binds only to 127.0.0.1.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Choose a valid local port.');
   const sample = demo ? demoState() : null;
@@ -102,6 +104,8 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
   const expectedAuthorization = Buffer.from(`Bearer ${token}`);
   const jobs = new Map();
   const plans = new Map();
+  const processPlans = new Map();
+  const processApi = { ...processFunctions, ...processControl };
   const storageApi = { ...storageFunctions, ...storage };
   const activityLog = demo ? null : activity || new ActivityLog();
   const demoEvents = [];
@@ -120,10 +124,10 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     return activityWarning;
   };
 
-  const json = (res, status, value) => {
+  const json = (res, status, value, sensitive = false) => {
     if (res.destroyed || res.writableEnded) return;
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(publicData(value)));
+    res.end(JSON.stringify(sensitive ? value : publicData(value)));
   };
   function exposeJob(job) {
     const { controller, promise, pending, bytes, ...data } = job;
@@ -140,7 +144,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     job.pending = lines.pop() || '';
     for (const line of lines) if (line) job.logs.push(redactText(clean(line)));
   }
-  function createJob(action, execute) {
+  function createJob(action, execute, { target, message } = {}) {
     if (activeJob) throw new HttpError(409, 'Another operation is running. Wait for it or cancel it first.');
     if (closing) throw new HttpError(503, 'The dashboard is closing.');
     while (jobs.size >= 50) jobs.delete(jobs.keys().next().value);
@@ -151,16 +155,18 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     job.promise = (async () => {
       let outcome = 'running';
       try {
-        job.activityWarning = await audit({ action, status: 'started', jobId: job.id });
+        job.activityWarning = await audit({ action, status: 'started', jobId: job.id, target, message });
         if (job.controller.signal.aborted) throw new Error('Operation cancelled.');
         const result = await execute({ signal: job.controller.signal, onOutput: chunk => appendLog(job, chunk) });
+        if (Array.isArray(result?.warnings)) job.warnings.push(...result.warnings.map(item => safeError(new Error(String(item)))));
         if (Array.isArray(result?.errors) && result.errors.length) job.warnings.push(`${result.errors.length} file operation${result.errors.length === 1 ? '' : 's'} could not be completed. Review the per-file errors and recovery history.`);
         else if (result?.status === 'partial') job.warnings.push('This operation completed only partly. Review the result and recovery history before continuing.');
+        if (action === 'process-stop' && result?.status === 'requested') job.warnings.push(result.message || 'A stop was requested, but the process has not exited yet. Refresh the process list to check.');
         if (result?.truncated && !result?.cancelled) job.warnings.push('The scan reached its time or entry limit. These results cover only the scanned portion.');
         if (job.controller.signal.aborted || result?.cancelled) {
           job.result = result ?? null;
           outcome = 'cancelled';
-          job.error = 'Cancelled. Partial results and any completed changes remain available for review.';
+          job.error = result?.scanMayContinue ? 'Monitoring stopped. Microsoft Defender may still be scanning. Check Windows Security for the result.' : 'Cancelled. Partial results and any completed changes remain available for review.';
           return;
         }
         if (typeof result?.code === 'number' && result.code !== 0) throw new Error(`The task exited with code ${result.code}. Review the output.`);
@@ -173,7 +179,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
         if (job.pending) { job.logs.push(redactText(clean(job.pending))); job.pending = ''; }
         if (job.logTruncated) job.logs.push('[Output truncated at 256 KB.]');
         const warning = await audit({ action, status: outcome === 'completed' && job.warnings.length ? 'warning' : outcome,
-          jobId: job.id, message: job.error || (job.warnings.length ? job.warnings.join(' ') : `${action} completed.`) });
+          jobId: job.id, target, message: `${message ? `${message} ` : ''}${job.error || (job.warnings.length ? job.warnings.join(' ') : job.result?.message || `${action} completed.`)}` });
         job.activityWarning = warning || job.activityWarning;
         job.status = outcome;
         job.finishedAt = new Date().toISOString();
@@ -182,6 +188,8 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
     })();
     return job;
   }
+
+  const controls = createControlApi({ workspace, demo, createJob, audit, network, audio, security, settings, fileActions });
 
   async function actionRequest(body) {
     objectFields(body, ['action', 'message', 'name', 'confirmed']);
@@ -194,6 +202,47 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
       push: options => pushCurrent(workspace, options), pull: options => pullCurrent(workspace, options),
       script: options => runProjectScript(workspace, body.name, options) };
     return createJob(body.action, demo ? async ({ onOutput }) => { onOutput('Demo only. No files, processes or remote repositories were changed.\n'); return { code: 0 }; } : actions[body.action]);
+  }
+
+  async function processRequest(route, body, signal) {
+    if (route === '/api/processes/plan') {
+      objectFields(body, ['pid']);
+      if (!Number.isInteger(body.pid) || body.pid <= 1 || body.pid > 2_147_483_647) throw new HttpError(400, 'Choose a valid process ID from the process list.');
+      const now = Date.now();
+      for (const [id, plan] of processPlans) if (Date.parse(plan.expiresAt) <= now) processPlans.delete(id);
+      let plan;
+      if (demo) {
+        const selected = sample.processes.processes.find(item => item.pid === body.pid);
+        if (!selected) throw new HttpError(400, 'Choose a process from the current demo list.');
+        plan = Object.freeze({ id: randomUUID(), pid: selected.pid, name: selected.name, startedAt: new Date(now - 60_000).toISOString(), owner: 'demo',
+          platform: sample.system.platform, method: 'Demo simulation', warning: 'Demo only. No real processes will be stopped.', expiresAt: new Date(now + 60_000).toISOString() });
+      } else plan = await processApi.planProcessStop(body.pid, { signal });
+      while (processPlans.size >= 20) processPlans.delete(processPlans.keys().next().value);
+      processPlans.set(plan.id, plan);
+      await audit({ action: 'process-stop-plan', status: 'review', target: String(plan.pid), message: `Review stopping ${plan.name} (PID ${plan.pid}).` });
+      return { status: 200, value: plan };
+    }
+    if (route === '/api/processes/stop') {
+      objectFields(body, ['planId', 'confirmed']);
+      if (body.confirmed !== true) throw new HttpError(400, 'Review and explicitly confirm the process stop first.');
+      const plan = typeof body.planId === 'string' ? processPlans.get(body.planId) : null;
+      if (!plan || !Number.isFinite(Date.parse(plan.expiresAt)) || Date.parse(plan.expiresAt) <= Date.now()) {
+        if (plan) processPlans.delete(plan.id);
+        throw new HttpError(400, 'This process plan is missing or expired. Refresh the process list and review a new plan.');
+      }
+      const job = createJob('process-stop', demo ? async ({ onOutput }) => {
+        const exists = sample.processes.processes.some(item => item.pid === plan.pid);
+        sample.processes.processes = sample.processes.processes.filter(item => item.pid !== plan.pid);
+        sample.ports.ports = sample.ports.ports.filter(item => item.pid !== plan.pid);
+        onOutput(`Demo only. Simulated stopping ${plan.name} (PID ${plan.pid}); no real processes were changed.\n`);
+        return { pid: plan.pid, name: plan.name, status: exists ? 'stopped' : 'already-exited', message: exists ? 'Demo process stopped.' : 'Demo process had already exited.', demo: true };
+      } : options => processApi.stopProcess(plan, { ...options, confirmed: true }), {
+        target: String(plan.pid), message: `Stop ${plan.name} (PID ${plan.pid}).`,
+      });
+      processPlans.delete(plan.id);
+      return { status: 202, value: { id: job.id } };
+    }
+    throw new HttpError(404, 'This process route was not found.');
   }
 
   async function storageRequest(route, body) {
@@ -307,6 +356,7 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
       return { diff: demo ? '- previous search\n+ streaming, bounded search' : await getGitDiff(workspace, file) };
     }
     queryParameters(url, []);
+    if (controls.getRoutes.has(pathname)) return controls.get(pathname, signal);
     if (pathname === '/api/git') return demo ? sample.git : getGitStatus(workspace);
     if (pathname === '/api/processes') return demo ? sample.processes : listProcesses({ signal });
     if (pathname === '/api/ports') return demo ? sample.ports : listPorts({ signal });
@@ -345,9 +395,15 @@ export async function startServer({ root = process.cwd(), port = 0, host = '127.
           json(res, 200, await getRoute(url, controller.signal));
         } else if (req.method === 'POST') {
           queryParameters(url, []);
-          if (url.pathname === '/api/actions') {
+          if (controls.postRoutes.has(url.pathname)) {
+            const result = await controls.post(url.pathname, await readJson(req), controller.signal);
+            json(res, result.status, result.value, result.sensitive);
+          } else if (url.pathname === '/api/actions') {
             const job = await actionRequest(await readJson(req));
             json(res, 202, { id: job.id });
+          } else if (url.pathname.startsWith('/api/processes/')) {
+            const result = await processRequest(url.pathname, await readJson(req), controller.signal);
+            json(res, result.status, result.value);
           } else if (url.pathname.startsWith('/api/storage/')) {
             const result = await storageRequest(url.pathname, await readJson(req));
             json(res, result.status, result.value);

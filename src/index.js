@@ -9,3 +9,9 @@ export { scanStorage, listScanLocations, planCleanup, executeCleanup, restoreCle
 export { startServer } from './server.js';
 export { ActivityLog } from './activity.js';
 export { getAbout } from './about.js';
+export { planProcessStop, stopProcess } from './process-control.js';
+export { getNetworkStatus, planNetworkChange, applyNetworkChange, getWifiPassword } from './network.js';
+export { getAudioStatus, setAudioSettings } from './audio.js';
+export { getSecurityStatus, planSecurityScan, runSecurityScan } from './security.js';
+export { getSystemSettings, planSettingChange, applySettingChange, openSettingsPage } from './settings.js';
+export { planFileAction, executeFileAction, listFileRecovery } from './file-actions.js';

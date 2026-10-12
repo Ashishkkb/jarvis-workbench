@@ -17,7 +17,7 @@
     <aside class="sidebar" aria-label="Main navigation">
       <button class="brand" id="brand-home" aria-label="Jarvis overview">
         <span class="brand-mark" aria-hidden="true">j<span>›</span></span>
-        <span class="brand-name">jarvis<span>YOUR LOCAL WORKBENCH</span></span>
+        <span class="brand-name">jarvis<span>LOCAL CONTROL CENTER</span></span>
       </button>
       <div class="workspace-switch">
         <span class="workspace-avatar" aria-hidden="true">⌘</span>
@@ -26,9 +26,9 @@
       </div>
       <nav id="nav" class="navigation"></nav>
       <div class="sidebar-bottom">
-        <button class="sidebar-link" id="toolbox-button"><span data-icon="sparkles"></span>Explore the toolbox<span class="keycap">?</span></button>
-        <button class="sidebar-link" id="support-button"><span data-icon="heart"></span>About & support</button>
-        <div class="local-note"><span class="status-dot"></span><span>Local by design.<small>Your workspace stays yours.</small></span><span data-icon="shield"></span></div>
+        <button class="sidebar-link" id="toolbox-button"><span data-icon="sparkles"></span>Command reference<span class="keycap">?</span></button>
+        <button class="sidebar-link" id="support-button"><span data-icon="heart"></span>Support Ashish</button>
+        <div class="local-note"><span class="status-dot"></span><span>Runs on your computer<small>No account or API key required</small></span><span data-icon="shield"></span></div>
       </div>
     </aside>
     <div class="main-shell">
@@ -36,14 +36,14 @@
         <div class="breadcrumb"><span data-icon="folder"></span><span id="breadcrumb-workspace">Workspace</span><span class="breadcrumb-divider">/</span><strong id="breadcrumb-screen">Overview</strong></div>
         <div class="topbar-actions">
           <button class="command-trigger" id="command-button"><span data-icon="search"></span><span>Find a tool or action…</span><kbd>Ctrl K</kbd></button>
-          <span class="local-badge"><span class="status-dot"></span>Local session</span>
+          <button class="support-trigger" id="header-support" aria-label="Support Ashish" title="Support Ashish"><span data-icon="heart"></span><span>Support Ashish</span></button>
           <button class="icon-button mobile-command" id="mobile-command" aria-label="Find a tool"><span data-icon="search"></span></button>
         </div>
       </header>
       <main id="main" tabindex="-1">
         <div id="page" aria-live="polite"><div class="initial-loading"><span class="spinner"></span><p>Opening your workspace…</p></div></div>
       </main>
-      <footer class="main-footer"><span><span data-icon="shield"></span> Connected to your computer. No cloud required.</span><span id="footer-version">Jarvis Workbench</span></footer>
+      <footer class="main-footer"><span><span data-icon="shield"></span> Local session &middot; Free &amp; open source</span><button class="footer-support" id="footer-support">Made by Ashish &middot; Support this project</button><span id="footer-version">Jarvis Workbench</span></footer>
     </div>
   </div>
   <div id="job-dock" class="job-dock" hidden aria-live="polite"></div>

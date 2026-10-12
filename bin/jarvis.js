@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { Dashboard, initialState, safeRemote } from '../src/app.js';
 import { renderDashboard, gitSummary, NAV } from '../src/ui.js';
 import { clean, friendlyError, bytes, fit } from '../src/format.js';
 import { demoState } from '../src/demo.js';
-import { searchContent, listDirectory, analyzeDisk, getGitStatus, listProcesses, listPorts, getProjectScripts, scanStorage, listScanLocations } from '../src/index.js';
+import { searchContent, listDirectory, analyzeDisk, getGitStatus, listProcesses, listPorts, getProjectScripts, scanStorage, listScanLocations, getNetworkStatus, getAudioStatus, getSecurityStatus, getSystemSettings } from '../src/index.js';
 import { openBrowser } from '../src/browser.js';
 import { run } from '../src/run.js';
 
-const HELP = `Jarvis Workbench 0.1.0
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+const HELP = `Jarvis Workbench ${VERSION}
 A local terminal dashboard. No API key, account or Linux syntax required.
 
   jarvis [--path folder]              Open the dashboard
@@ -22,6 +24,10 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   jarvis locations [--json]           List available drive/home/temp scopes
   jarvis processes [--json]           Inspect processes
   jarvis ports [--json]               Inspect local listening ports
+  jarvis network [--json]             Inspect network adapters and saved profiles
+  jarvis sound [--json]               Inspect volume and sound devices
+  jarvis security [--json]            Inspect Microsoft Defender status
+  jarvis settings [--json]            Inspect power plans and settings shortcuts
   jarvis doctor                      Check available tools
 
   --path folder       Workspace, default current directory
@@ -31,7 +37,7 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   --json              Machine-readable output for a command
   --demo              Explore a sample workspace without changing files
   --snapshot          Print a dashboard frame instead of opening the TUI
-  --screen git        Initial dashboard screen (see 1-9 in the sidebar)
+  --screen git        Initial dashboard screen (see 1-9 and 0 in the sidebar)
   --width 110         Snapshot width
   --port 4177         Browser port (default: a free port)
   --no-open           Print browser URL without opening it
@@ -40,17 +46,17 @@ A local terminal dashboard. No API key, account or Linux syntax required.
   -h, --help          Show this help
   -v, --version       Show version
 
-Dashboard: 1-9 tools, arrows select, Enter opens, Ctrl+P task palette,
+Dashboard: 1-9 tools, 0 Control Center, $ Support Ashish, arrows select, Enter opens, Ctrl+P task palette,
 B browser, A activity, storage: S select drive, C cleanup review, H recovery,
 / search/filter, R refresh, Esc back/cancel, Q quit.
-Git uploads and project scripts require an explicit review in the dashboard.
+Use the dashboard to review system changes, file actions, Git uploads and scripts.
 `;
 
 function parse(args) {
   const opts = { root: process.cwd(), command: 'dashboard', words: [] };
   const values = new Set(['--path', '--glob', '--width', '--screen', '--port']);
   const flags = new Set(['--json', '--regex', '--case-sensitive', '--demo', '--snapshot', '--no-color', '--ascii', '--web', '--no-open']);
-  const commands = new Set(['dashboard', 'web', 'status', 'search', 'files', 'disk', 'scan', 'locations', 'processes', 'ports', 'doctor']);
+  const commands = new Set(['dashboard', 'web', 'status', 'search', 'files', 'disk', 'scan', 'locations', 'processes', 'ports', 'network', 'sound', 'security', 'settings', 'doctor']);
   let literal = false;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -69,7 +75,7 @@ function parse(args) {
   opts.root = path.resolve(opts.path || process.cwd());
   if (opts.web) opts.command = 'web';
   if (opts.port && (!Number.isInteger(Number(opts.port)) || Number(opts.port) < 0 || Number(opts.port) > 65535)) throw new Error('--port must be between 0 and 65535.');
-  if (opts.screen && !NAV.some(v => v[0] === opts.screen)) throw new Error('Unknown screen. Choose overview, files, search, git, processes, ports, disk, scripts or recipes.');
+  if (opts.screen && !NAV.some(v => v[0] === opts.screen)) throw new Error('Unknown screen. Choose overview, files, search, git, processes, ports, disk, scripts, recipes or control.');
   if (opts.width && (!Number.isInteger(Number(opts.width)) || Number(opts.width) < 24 || Number(opts.width) > 300)) throw new Error('--width must be an integer between 24 and 300.');
   if (opts.command !== 'search' && opts.words.length) throw new Error('Use --path to choose a folder. See --help for examples.');
   return opts;
@@ -80,7 +86,7 @@ function print(value, json = false) { process.stdout.write((json ? JSON.stringif
 async function main() {
   const options = parse(process.argv.slice(2));
   if (options.help) return print(HELP);
-  if (options.version) return print('0.1.0');
+  if (options.version) return print(VERSION);
   if (!(await stat(options.root)).isDirectory()) throw new Error('The workspace must be a directory.');
   if (options.command === 'web') {
     const { startServer } = await import('../src/server.js');
@@ -96,12 +102,24 @@ async function main() {
       try { const value = await run(command, ['--version']); return `${command}: ${clean(value.stdout.split('\n')[0])}`; }
       catch { return `${command}: unavailable${command === 'rg' ? ' (built-in search will be used)' : ' (Git views unavailable)'}`; }
     }));
-    return print(`Node ${process.version}\n${checks.join('\n')}\nPlatform: ${process.platform}\nWorkspace: ${options.root}\nNetwork: only explicit Git actions or project scripts\nTelemetry: none`);
+    return print(`Node ${process.version}\n${checks.join('\n')}\nPlatform: ${process.platform}\nWorkspace: ${options.root}\nConnections: explicit Git, project, network and Windows security actions\nTelemetry: none`);
+  }
+  const inspectors = { network: getNetworkStatus, sound: getAudioStatus, security: getSecurityStatus, settings: getSystemSettings };
+  if (inspectors[options.command]) {
+    if (options.demo) throw new Error('--demo is available for the dashboard only.');
+    const data = await inspectors[options.command]();
+    if (options.json) return print(data, true);
+    if (!data.available) return print(data.reason || data.warning || 'This system control is unavailable.');
+    const lines = options.command === 'network' ? data.adapters.map(item => `${clean(item.name)} | ${clean(item.status)} | ${(item.addresses || []).map(clean).join(', ')}`)
+      : options.command === 'sound' ? [`Volume: ${data.volume}% | ${data.muted ? 'Muted' : 'Sound on'}`, ...data.devices.map(item => `${clean(item.name)} | ${clean(item.kind)}${item.isDefault ? ' | Default' : ''}`)]
+      : options.command === 'security' ? [`Microsoft Defender: ${data.enabled === true ? 'Enabled' : data.enabled === false ? 'Disabled' : 'Unknown'}`, `Real-time protection: ${data.realtimeEnabled === true ? 'On' : data.realtimeEnabled === false ? 'Off' : 'Unknown'}`, `Definitions: ${clean(data.definitionsUpdated || 'Not reported')}`, data.scanUnavailableReason || 'Scan controls available in the dashboard.']
+      : data.powerPlans.map(item => `${item.active ? '* ' : '  '}${clean(item.name)}`);
+    return print(lines.join('\n') + '\nOpen jarvis and press 0, or jarvis --web, to use these controls.');
   }
   if (options.command === 'dashboard') {
     if (options.json) throw new Error('Choose a command such as status or search with --json.');
     if (options.snapshot || !process.stdin.isTTY || !process.stdout.isTTY) {
-      const state = options.demo ? demoState() : initialState(options.root);
+      const state = options.demo ? new Dashboard(options.root, { demo: true }).state : initialState(options.root);
       state.screen = options.screen || 'overview';
       if (!options.demo) {
         if (['overview', 'git'].includes(state.screen)) state.git = await getGitStatus(options.root);
@@ -110,6 +128,7 @@ async function main() {
         else if (state.screen === 'ports') state.ports = await listPorts();
         else if (state.screen === 'disk') state.disk = await analyzeDisk(options.root);
         else if (state.screen === 'scripts') state.scripts = await getProjectScripts(options.root);
+        else if (state.screen === 'control') state.control = await new Dashboard(options.root).readControl();
       }
       if (state.git) state.git.remoteUrl = safeRemote(state.git.remoteUrl);
       return print(renderDashboard(state, Number(options.width) || 110, 32, { color: false, ascii: options.ascii }));

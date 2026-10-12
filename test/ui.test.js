@@ -95,7 +95,8 @@ test('demo navigation, prompts, and confirmations use explicit keyboard choices'
 test('palette keeps a lower selected task visible and opens the selected screen', async () => {
   const { app } = dashboard({ demo: true });
   await app.onKey(undefined, { name: 'p', ctrl: true });
-  for (let index = 0; index < 18; index++) await app.onKey(undefined, { name: 'down' });
+  const lastScreen = app.state.modal.choices.findLastIndex(choice => choice.screen);
+  for (let index = 0; index < lastScreen; index++) await app.onKey(undefined, { name: 'down' });
   const selected = app.state.modal.choices[app.state.modal.choice];
   const frame = renderDashboard(app.state, 110, 32, { color: false });
   assert.ok(frame.includes(`> ${selected.title}`), 'the selected task stays inside the palette viewport');
@@ -174,4 +175,195 @@ test('full review text must be followed by explicit confirmation', async () => {
   assert.equal(ran, false);
   await app.onKey('\r', { name: 'return' });
   assert.equal(ran, false);
+});
+
+
+test('process stop reviews the selected identity and requires explicit Y', async () => {
+  const { app } = dashboard();
+  const plan = Object.freeze({ pid: 321, name: 'fixture', owner: 'test user', startedAt: '2026-01-01', warning: 'Unsaved work may be lost.' });
+  let stopped = 0;
+  app.options.processControl = {
+    planProcessStop: async pid => { assert.equal(pid, 321); return plan; },
+    stopProcess: async (received, options) => {
+      assert.equal(received, plan); assert.equal(options.confirmed, true); stopped++;
+      return { status: 'requested', message: 'Request sent; process is still running.' };
+    }
+  };
+  app.refresh = async () => {};
+  app.state.screen = 'processes';
+  app.state.processes = { processes: [{ pid: 321, name: 'fixture', cpu: 1, memory: 1024 }] };
+  await app.onKey('k', { name: 'k' });
+  assert.equal(app.state.modal.type, 'confirm');
+  assert.match(app.state.modal.detail, /PID: 321/);
+  assert.match(app.state.modal.detail, /Unsaved work/);
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(stopped, 0);
+  await app.onKey('k', { name: 'k' });
+  app.state.processes.processes = [{ pid: 999, name: 'different process', cpu: 1, memory: 1024 }];
+  await app.onKey('y', { name: 'y' });
+  assert.equal(stopped, 1);
+  assert.equal(app.state.message.tone, 'warn');
+  assert.match(app.state.message.text, /still running/);
+});
+
+test('demo process stop confirmation never invokes the real backend', async () => {
+  const { app } = dashboard({ demo: true });
+  let touched = false;
+  app.options.processControl = { planProcessStop: async () => { touched = true; }, stopProcess: async () => { touched = true; } };
+  app.state.screen = 'processes';
+  await app.onKey('k', { name: 'k' });
+  assert.match(app.state.modal.detail, /Demo only/);
+  await app.onKey('y', { name: 'y' });
+  assert.equal(touched, false);
+});
+
+
+test('Control Center uses 0, preserves existing numbered tools, and exposes Support', async () => {
+  const { app } = dashboard({ demo: true });
+  app.options.nativeControl = new Proxy({}, { get() { throw new Error('Demo must not call a native backend'); } });
+  await app.onKey('0', { name: '0' });
+  assert.equal(app.state.screen, 'control');
+  let frame = renderDashboard(app.state, 110, 32, { color: false });
+  assert.match(frame, /CONTROL CENTER/);
+  assert.match(frame, /55%/);
+  assert.match(frame, /\$ Support/);
+  await app.onKey('9', { name: '9' });
+  assert.equal(app.state.screen, 'recipes');
+  await app.onKey('$', { name: '$' });
+  assert.match(app.state.modal.title, /Support Ashish/);
+  await app.onKey(undefined, { name: 'escape' });
+  app.palette();
+  assert.ok(app.state.modal.choices.some(item => item.title === 'Full malware scan'));
+  await app.securityAction('full');
+  assert.match(app.state.modal.content, /Real scans use Microsoft Defender/);
+});
+
+function controlMocks(app, changes = {}) {
+  const records = [];
+  app.options.nativeControl = {
+    network: { getNetworkStatus: async () => ({ available: true, adapters: [{ id: 'fixture', name: 'Wi-Fi', wifi: true, profile: 'Home', dns: ['1.1.1.1'] }], profiles: [{ name: 'Home', adapterId: 'fixture' }] }) },
+    audio: { getAudioStatus: async () => ({ available: true, volume: 25, muted: false }), setAudioSettings: async value => { records.push(value); return { available: true, volume: value.volume ?? 25, muted: value.muted ?? false }; } },
+    security: { getSecurityStatus: async () => ({ available: false, reason: 'Fixture unavailable' }) },
+    settings: { getSystemSettings: async () => ({ available: true, powerPlans: [], items: [] }) }, ...changes,
+  };
+  return records;
+}
+
+test('terminal sound changes need explicit review and are sent only after Y', async () => {
+  const { app } = dashboard();
+  const records = controlMocks(app);
+  await app.audioAction('volume');
+  assert.equal(app.state.modal.type, 'input');
+  app.state.modal.value = '70';
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(app.state.modal.type, 'confirm');
+  assert.equal(records.length, 0);
+  await app.onKey('y', { name: 'y' });
+  assert.deepEqual(records, [{ volume: 70, confirmed: true }]);
+  assert.match(app.state.message.text, /70%/);
+});
+
+test('saved Wi-Fi passwords are ephemeral, absent from activity and operation logs, and erased on Esc', async () => {
+  const { app } = dashboard();
+  const events = [];
+  app.activity = { append: async event => events.push(event), list: async () => events };
+  const secret = 'fixture-super-private-password';
+  let reads = 0;
+  controlMocks(app, { network: {
+    getNetworkStatus: async () => ({ available: true, adapters: [{ id: 'fixture', name: 'Wi-Fi', wifi: true }], profiles: [{ name: 'Home', adapterId: 'fixture' }] }),
+    getWifiPassword: async input => { reads++; assert.equal(input.confirmed, true); return { profile: input.profile, password: secret }; },
+  } });
+  await app.networkAction('password');
+  await app.onKey('\r', { name: 'return' });
+  assert.equal(app.state.modal.type, 'confirm');
+  assert.equal(reads, 0);
+  await app.onKey('y', { name: 'y' });
+  assert.equal(reads, 1);
+  assert.equal(app.state.modal.sensitive, true);
+  assert.match(app.state.modal.content, new RegExp(secret));
+  assert.ok(!JSON.stringify(events).includes(secret));
+  assert.ok(!JSON.stringify(app.state.activity).includes(secret));
+  assert.ok(!JSON.stringify(app.state.operationLog).includes(secret));
+  await app.onKey(undefined, { name: 'escape' });
+  assert.equal(app.state.modal, null);
+  assert.ok(!JSON.stringify(app.state).includes(secret));
+  assert.ok(!app.frame.includes(secret));
+});
+
+test('Defender monitoring cancellation keeps its continuation warning in the terminal', async () => {
+  const { app } = dashboard();
+  let invoked = false;
+  controlMocks(app, { security: {
+    planSecurityScan: async () => ({ title: 'Quick Defender scan', warning: 'May quarantine files. Stopping monitoring does not stop Defender.', path: null }),
+    runSecurityScan: async (plan, { confirmed }) => { invoked = confirmed; return { cancelled: true, scanMayContinue: true, message: 'Defender may still be scanning.' }; },
+  } });
+  await app.securityAction('quick');
+  assert.match(app.state.modal.detail, /does not stop Defender/);
+  assert.equal(invoked, false);
+  await app.onKey('y', { name: 'y' });
+  assert.equal(invoked, true);
+  assert.match(app.state.modal.content, /Defender may still be scanning/);
+  assert.equal(app.state.message.tone, 'warn');
+  assert.equal(app.state.scanMonitoring, false);
+});
+
+test('file-manager actions review exact source and destination before execution', async () => {
+  const { app } = dashboard();
+  let executed = 0;
+  const issued = Object.freeze({ root: 'fixture', source: 'fixture/hello.txt', destination: 'fixture/copy.txt', files: 1, bytes: 10, warning: 'No overwrites.' });
+  app.options.fileActions = {
+    planFileAction: async (root, input) => { assert.equal(input.action, 'copy'); assert.equal(input.path, 'hello.txt'); assert.equal(input.destination, 'copy.txt'); return issued; },
+    executeFileAction: async (plan, { confirmed }) => { assert.equal(plan, issued); assert.equal(confirmed, true); executed++; return { message: 'File copied.' }; },
+  };
+  app.refresh = async () => {};
+  app.state.screen = 'files';
+  app.state.files.entries = [{ name: 'hello.txt', path: 'hello.txt', type: 'file', size: 10 }];
+  await app.onKey('c', { name: 'c' });
+  app.state.modal.value = 'copy.txt';
+  await app.onKey('\r', { name: 'return' });
+  assert.match(app.state.modal.detail, /fixture\/hello.txt/);
+  assert.match(app.state.modal.detail, /fixture\/copy.txt/);
+  assert.equal(executed, 0);
+  await app.onKey('y', { name: 'y' });
+  assert.equal(executed, 1);
+});
+
+
+test('partial file operations remain warnings and expose the remaining destination', async () => {
+  const { app } = dashboard();
+  app.options.fileActions = {
+    planFileAction: async () => ({ root: 'fixture', source: 'fixture/file', destination: 'fixture/copy', files: 1, bytes: 1, warning: 'Review' }),
+    executeFileAction: async () => ({ status: 'partial', destination: 'fixture/copy', message: 'Copy cleanup needs review.', errors: ['A new external item prevented cleanup.'] }),
+  };
+  app.state.screen = 'files';
+  app.state.files.entries = [{ name: 'file', path: 'file', type: 'file', size: 1 }];
+  app.refresh = async () => {};
+  await app.fileAction('trash');
+  await app.onKey('y', { name: 'y' });
+  assert.equal(app.state.message.tone, 'warn');
+  assert.match(app.state.modal.content, /fixture\/copy/);
+  assert.match(app.state.modal.content, /external item prevented cleanup/);
+});
+
+test('unknown protection values are not rendered as disabled in Control Center', () => {
+  const { app } = dashboard({ demo: true });
+  app.state.screen = 'control';
+  app.state.control.security.enabled = null;
+  app.state.control.security.realtimeEnabled = null;
+  const frame = renderDashboard(app.state, 110, 32, { color: false });
+  assert.match(frame, /Defender unknown/);
+  assert.match(frame, /Real-time unknown/);
+  assert.doesNotMatch(frame, /Defender disabled/);
+});
+
+test('long confirmation text remains scrollable on a small terminal', async () => {
+  const { app } = dashboard();
+  app.output.rows = 18;
+  app.confirm('Review details', Array.from({ length: 20 }, (_, index) => `Line ${index + 1} to review`).join('\n'), () => {});
+  let frame = renderDashboard(app.state, 56, 17, { color: false });
+  assert.match(frame, /Up\/Down/);
+  await app.onKey(undefined, { name: 'pagedown' });
+  frame = renderDashboard(app.state, 56, 17, { color: false });
+  assert.match(frame, /Line 11 to review/);
+  assert.match(frame, /Continue\?/);
 });

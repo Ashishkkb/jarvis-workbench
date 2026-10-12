@@ -5,11 +5,21 @@ export const NAV = [
   ['files', 'Files', 'Browse, preview and follow logs'],
   ['search', 'Search', 'Find text without remembering grep'],
   ['git', 'Git & upload', 'Review, save and upload your work'],
-  ['processes', 'Processes', 'See what is running'],
+  ['processes', 'Processes', 'Inspect running programs and review a process to stop'],
   ['ports', 'Ports', 'Find what is listening'],
   ['disk', 'Storage', 'Scan disk space, clean temporary files and recover cleanup'],
   ['scripts', 'Project tasks', 'Run named project scripts'],
-  ['recipes', 'Toolbox', 'Start with what you want to do']
+  ['recipes', 'Toolbox', 'Start with what you want to do'],
+  ['control', 'Control Center', 'Wi-Fi, sound, Defender and Windows settings']
+];
+
+export const CONTROL_ITEMS = [
+  { id: 'network', title: 'Network & Wi-Fi', description: 'Connections, IPv4 DNS and saved passwords' },
+  { id: 'audio', title: 'Sound', description: 'Volume, mute and output settings' },
+  { id: 'security', title: 'Security', description: 'Microsoft Defender scans and protection history' },
+  { id: 'power', title: 'Power plan', description: 'Choose an existing Windows power plan' },
+  { id: 'settings', title: 'Windows Settings', description: 'Open native OS settings' },
+  { id: 'support', title: 'Support Ashish', description: 'About this free, open-source project' },
 ];
 
 const theme = {
@@ -103,7 +113,8 @@ function fileRows(state, w, h) {
       ...(p.truncated ? [row('Preview is bounded; use Search to find text elsewhere in the file.', 'muted')] : [])];
   }
   const rows = [row('FILE EXPLORER', 'accent'), row(state.files?.path || './', 'heading'),
-    row('[Enter] Open   [Backspace] Parent   [/] Filter names   [R] Refresh', 'muted'), row()];
+    row('[Enter] Open  [Backspace] Parent  [/] Filter', 'muted'),
+    ...wrap('[N] New folder  [C] Copy  [M] Move  [E] Rename  [X] To recovery  [H] Restore', w).map(value => row(value, 'muted')), row()];
   if (state.fileFilter) rows.push(row(`Filter: ${state.fileFilter}   [Esc] Clear`, 'warn'));
   rows.push(row(`  ${fit('NAME', Math.max(14, w - 28))}${fit('SIZE', 12)}TYPE`, 'muted'));
   const entries = visibleFiles(state);
@@ -159,7 +170,7 @@ function gitRows(state, w, h) {
 function processRows(state, w, h) {
   const data = state.processes;
   const rows = [row('PROCESS EXPLORER', 'accent'), row('See what is running without remembering ps or top.', 'muted'),
-    row(`[R] Refresh  [S] Sort by ${state.processSort === 'memory' ? 'CPU' : 'memory'}  [/] Filter`, 'muted'),
+    row(`[K] Stop selected  [S] Sort ${state.processSort === 'memory' ? 'CPU' : 'memory'}  [/] Filter  [R] Refresh`, 'muted'),
     row(`CPU column: ${data?.cpuLabel || 'platform dependent'}  |  ${data?.processes?.length || 0} processes`), row()];
   if (data?.warning) rows.push(...wrap(data.warning, w).map(v => row(v, 'warn')));
   rows.push(row(`  ${fit('PID', 8)}${fit('CPU', 12)}${fit('MEMORY', 12)}NAME`, 'muted'));
@@ -221,11 +232,33 @@ function recipeRows(state, w, h) {
   return rows;
 }
 
+function controlRows(state, w, h) {
+  const { network, audio, security, settings } = state.control || {};
+  const connected = network?.adapters?.find(item => item.profile) || network?.adapters?.[0];
+  const plan = settings?.powerPlans?.find(item => item.active);
+  const rows = [row('CONTROL CENTER', 'accent'), row('Your computer. Familiar controls. Explicit review.', 'muted'),
+    row('[Enter] Actions   [W] Wi-Fi   [V] Sound   [S] Security', 'muted'), row()];
+  rows.push(row(`NETWORK  ${network?.available ? `${connected?.name || 'No adapters'}  ${connected?.profile || connected?.status || ''}` : network ? 'Unavailable on this session' : 'Reading...'}`));
+  rows.push(row(`SOUND    ${audio?.available ? `${Math.round(audio.volume)}%  ${audio.muted ? 'Muted' : 'Unmuted'}` : audio ? 'Unavailable on this session' : 'Reading...'}`));
+  rows.push(row(`SECURITY ${security?.available ? `Defender ${security.enabled === true ? 'enabled' : security.enabled === false ? 'disabled' : 'unknown'}  /  Real-time ${security.realtimeEnabled === true ? 'on' : security.realtimeEnabled === false ? 'off' : 'unknown'}` : security ? 'Open Security for availability details' : 'Reading...'}`, security?.available && security.realtimeEnabled === false ? 'warn' : 'normal'));
+  rows.push(row(`POWER    ${plan?.name || settings?.powerPlanError || (settings ? 'Use native settings' : 'Reading...')}`));
+  rows.push(row(), row('CHOOSE A CONTROL', 'accent'));
+  rows.push(...table(state, CONTROL_ITEMS, Math.max(1, h - rows.length - 2), item => `${item.title}${w > 65 ? '  /  ' + item.description : ''}`));
+  return rows;
+}
+
 function modalRows(state, w, h) {
   const m = state.modal;
   const rows = [row(m.title.toUpperCase(), m.type === 'confirm' ? 'warn' : 'accent'), row()];
+  if (m.type === 'confirm') {
+    const details = String(m.detail || '').split('\n').flatMap(value => wrap(value, w));
+    const available = Math.max(1, h - rows.length - 3);
+    const start = Math.min(m.offset || 0, Math.max(0, details.length - available));
+    return [...rows, ...details.slice(start, start + available).map(value => row(value, 'muted')), row(),
+      ...(details.length > available ? [row(`[Up/Down] Review ${start + 1}-${Math.min(start + available, details.length)} of ${details.length} lines`, 'muted')] : []),
+      row('Continue? [Y] Yes   [N / Esc / Enter] Cancel', 'heading')];
+  }
   if (m.detail) rows.push(...String(m.detail).split('\n').flatMap(v => wrap(v, w)).slice(0, Math.max(2, h - 10)).map(v => row(v, 'muted')), row());
-  if (m.type === 'confirm') return [...rows, row('Continue? [Y] Yes   [N / Esc] Cancel', 'heading')];
   if (m.type === 'text') {
     const lines = String(m.content || '').split(/\r?\n/).flatMap(line => wrap(line, w));
     const start = Math.min(m.offset || 0, Math.max(0, lines.length - (h - 5)));
@@ -244,7 +277,7 @@ function modalRows(state, w, h) {
 }
 
 const screens = { overview: overviewRows, files: fileRows, search: searchRows, git: gitRows, processes: processRows,
-  ports: portRows, disk: diskRows, scripts: scriptRows, recipes: recipeRows };
+  ports: portRows, disk: diskRows, scripts: scriptRows, recipes: recipeRows, control: controlRows };
 
 /** Pure terminal renderer. Untrusted filenames, process names and output are sanitized. */
 export function renderDashboard(state, columns = 110, lines = 32, { color = true, ascii = false } = {}) {
@@ -264,7 +297,7 @@ export function renderDashboard(state, columns = 110, lines = 32, { color = true
   const nav = NAV.find(v => v[0] === state.screen) || NAV[0];
   const body = state.modal ? modalRows(state, contentWidth, bodyHeight) : (screens[state.screen] || overviewRows)(state, contentWidth, bodyHeight);
   const frame = [];
-  frame.push(paint(fit('  JARVIS  /  TERMINAL WORKBENCH', w - 15), 'accent') + paint(fit(state.demo ? 'DEMO  0.1.0' : 'LOCAL  0.1.0', 15), 'muted'));
+  frame.push(paint(fit('  JARVIS  /  TERMINAL WORKBENCH', w - 15), 'accent') + paint(fit(state.demo ? 'DEMO SESSION' : 'LOCAL SESSION', 15), 'muted'));
   frame.push(paint(fit(`  ${state.root}  ${side ? '' : '| ' + nav[1]}`, w), 'muted'));
   frame.push(paint(line.repeat(w), 'border'));
   for (let i = 0; i < bodyHeight; i++) {
@@ -272,7 +305,7 @@ export function renderDashboard(state, columns = 110, lines = 32, { color = true
     if (i === 0) sidebar = row('  WORKSPACE', 'muted');
     if (i >= 2 && i < NAV.length + 2) {
       const [id, label] = NAV[i - 2];
-      sidebar = row(` ${state.screen === id ? '>' : ' '} ${i - 1}  ${label}`, state.screen === id ? 'selected' : 'normal');
+      sidebar = row(` ${state.screen === id ? '>' : ' '} ${(i - 1) % 10}  ${label}`, state.screen === id ? 'selected' : 'normal');
     }
     if (i === NAV.length + 4) sidebar = row('  Ctrl+P  Palette', 'accent');
     if (i === NAV.length + 5) sidebar = row('  Tab     Next tool', 'muted');
@@ -283,9 +316,9 @@ export function renderDashboard(state, columns = 110, lines = 32, { color = true
       paint(fit(item.text, contentWidth), item.tone) + ' ');
   }
   frame.push(paint(line.repeat(w), 'border'));
-  const busy = state.busy ? `  WORKING  ${state.busy}  [Esc] Cancel` : `  ${state.message?.text || 'Ready. Choose a tool or press Ctrl+P to find a task.'}`;
+  const busy = state.busy ? `  WORKING  ${state.busy}  [Esc] ${state.scanMonitoring ? 'Stop monitoring' : 'Cancel'}` : `  ${state.message?.text || 'Ready. Choose a tool or press Ctrl+P to find a task.'}`;
   frame.push(paint(fit(busy, w), state.busy ? 'accent' : state.message?.tone || 'muted'));
-  frame.push(paint(fit(w < 100 ? '  Q Quit  1-9 Tools  Enter Open  B Browser  A Logs  R Refresh' : '  Q Quit   1-9 Tools   Arrows Select   Enter Open   B Browser   A Activity   R Refresh', w), 'muted'));
+  frame.push(paint(fit(w < 100 ? ' Q Quit  0 Controls  $ Support  B Web  A Logs  Ctrl+P Tasks' : ' Q Quit  1-9 Tools  0 Controls  Enter Open  B Browser  A Logs  $ Support  R Refresh', w), 'muted'));
   frame.push(paint(fit(`  ${state.lastRefresh ? 'Updated ' + new Date(state.lastRefresh).toLocaleTimeString() : 'Local tools'}${state.lastFetch ? '  /  Remote checked ' + new Date(state.lastFetch).toLocaleTimeString() : '  /  Network checks are manual'}`, w), 'muted'));
   return frame.join('\r\n');
 }

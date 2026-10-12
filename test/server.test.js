@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -76,7 +76,7 @@ test('server binds only loopback and generates a session-specific bootstrap frag
 
 test('every API route requires bearer authentication and rejects hostile origin/host', async t => {
   const { request, origin } = await session(t);
-  for (const route of ['/api/overview', '/api/files', '/api/preview', '/api/search', '/api/git', '/api/diff', '/api/processes', '/api/ports', '/api/disk', '/api/scripts', '/api/recipes', '/api/activity', '/api/actions', '/api/jobs/missing']) {
+  for (const route of ['/api/overview', '/api/files', '/api/preview', '/api/search', '/api/git', '/api/diff', '/api/processes', '/api/processes/plan', '/api/processes/stop', '/api/ports', '/api/disk', '/api/scripts', '/api/recipes', '/api/activity', '/api/actions', '/api/jobs/missing']) {
     assert.equal((await request(route, { authenticated: false })).status, 401, route);
   }
   assert.equal((await request('/api/overview', { headers: { Authorization: 'Bearer incorrect' } })).status, 401);
@@ -317,4 +317,231 @@ test('demo storage exercises scan, exact sample review, quarantine and recovery 
   assert.equal(restored.result.restoredBytes, plan.json.totalBytes);
   assert.equal(restored.result.reclaimedBytes, 0);
   assert.equal(restored.result.status, 'restored');
+});
+
+
+function fakeProcessPlan(pid, fields = {}) {
+  return Object.freeze({ id: randomUUID(), pid, name: 'fixture-worker', startedAt: new Date(0).toISOString(), owner: 'fixture-user',
+    platform: process.platform, method: 'Fixture stop', warning: 'Unsaved work may be lost.', expiresAt: new Date(Date.now() + 60_000).toISOString(), ...fields });
+}
+
+test('process stop requires the exact reviewed server-side plan and explicit confirmation', async t => {
+  const root = await fixture(t);
+  let issuedPlan, stopped = 0;
+  const processControl = {
+    planProcessStop: async (pid, { signal }) => { assert.ok(signal instanceof AbortSignal); issuedPlan = fakeProcessPlan(pid); return issuedPlan; },
+    stopProcess: async (plan, { confirmed, signal, onOutput }) => {
+      assert.equal(plan, issuedPlan);
+      assert.equal(confirmed, true);
+      assert.ok(signal instanceof AbortSignal);
+      stopped++;
+      onOutput('Fixture process exited.\n');
+      return { pid: plan.pid, name: plan.name, status: 'stopped', message: 'The selected process exited.' };
+    },
+  };
+  const { request, events } = await session(t, { root, demo: false, processControl });
+  const review = await request('/api/processes/plan', { method: 'POST', body: { pid: 54321 } });
+  assert.equal(review.status, 200);
+  assert.equal(review.json.pid, 54321);
+  assert.equal(stopped, 0);
+  for (const body of [{ pid: 54321, confirmed: true }, { planId: review.json.id }, { planId: review.json.id, confirmed: 'true' }, { planId: review.json.id, confirmed: true, pid: 54321 }, { planId: randomUUID(), confirmed: true }]) {
+    assert.equal((await request('/api/processes/stop', { method: 'POST', body })).status, 400);
+  }
+  const stop = await request('/api/processes/stop', { method: 'POST', body: { planId: review.json.id, confirmed: true } });
+  assert.equal(stop.status, 202);
+  const job = await finished(request, stop.json.id);
+  assert.equal(job.status, 'completed');
+  assert.equal(job.result.status, 'stopped');
+  assert.equal(stopped, 1);
+  assert.match(job.logs.join(' '), /Fixture process exited/);
+  assert.equal((await request('/api/processes/stop', { method: 'POST', body: { planId: review.json.id, confirmed: true } })).status, 400);
+  assert.ok(events.some(event => event.action === 'process-stop-plan' && event.status === 'review' && /fixture-worker.*54321/.test(event.message)));
+  assert.ok(events.some(event => event.action === 'process-stop' && event.status === 'completed' && /fixture-worker.*54321/.test(event.message)));
+});
+
+test('process schemas reject invalid IDs and execution rejects expired or evicted plans', async t => {
+  const root = await fixture(t);
+  let expiresAt = new Date(0).toISOString(), stops = 0;
+  const processControl = { planProcessStop: async pid => fakeProcessPlan(pid, { expiresAt }), stopProcess: async () => { stops++; } };
+  const { request } = await session(t, { root, demo: false, processControl });
+  for (const body of [{}, { pid: 0 }, { pid: 1 }, { pid: -1 }, { pid: 2_147_483_648 }, { pid: 2.5 }, { pid: '54321' }, { pid: 54321, force: true }, { pid: 54321, command: 'shell' }, null, []]) {
+    assert.equal((await request('/api/processes/plan', { method: 'POST', body: JSON.stringify(body) })).status, 400, JSON.stringify(body));
+  }
+  assert.equal((await request('/api/processes/plan?pid=54321', { method: 'POST', body: { pid: 54321 } })).status, 400);
+  const expired = await request('/api/processes/plan', { method: 'POST', body: { pid: 54321 } });
+  assert.equal((await request('/api/processes/stop', { method: 'POST', body: { planId: expired.json.id, confirmed: true } })).status, 400);
+  expiresAt = new Date(Date.now() + 60_000).toISOString();
+  let oldest;
+  for (let index = 0; index < 21; index++) {
+    const response = await request('/api/processes/plan', { method: 'POST', body: { pid: 54321 } });
+    assert.equal(response.status, 200);
+    if (!oldest) oldest = response.json;
+  }
+  assert.equal((await request('/api/processes/stop', { method: 'POST', body: { planId: oldest.id, confirmed: true } })).status, 400);
+  assert.equal(stops, 0);
+});
+
+test('process plan and stop routes reject missing authentication and foreign origins', async t => {
+  const { request } = await session(t);
+  for (const route of ['/api/processes/plan', '/api/processes/stop']) {
+    const body = route.endsWith('/plan') ? { pid: 14280 } : { planId: randomUUID(), confirmed: true };
+    assert.equal((await request(route, { method: 'POST', body, authenticated: false })).status, 401);
+    assert.equal((await request(route, { method: 'POST', body, headers: { Origin: 'https://attacker.invalid' } })).status, 403);
+    assert.equal((await request(route, { method: 'POST', body, headers: { Host: 'attacker.invalid' } })).status, 403);
+  }
+});
+
+test('process stop jobs serialize with other work and may be cancelled before execution', async t => {
+  const root = await fixture(t);
+  let release, stopped = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const events = [];
+  const activity = { append: async event => { events.push(event); if (event.action === 'process-stop' && event.status === 'started') await gate; }, list: async () => events };
+  const processControl = { planProcessStop: async pid => fakeProcessPlan(pid), stopProcess: async () => { stopped++; return { status: 'stopped' }; } };
+  const { request } = await session(t, { root, demo: false, processControl, activity });
+  try {
+    const review = await request('/api/processes/plan', { method: 'POST', body: { pid: 54321 } });
+    const stop = await request('/api/processes/stop', { method: 'POST', body: { planId: review.json.id, confirmed: true } });
+    assert.equal(stop.status, 202);
+    assert.equal((await request('/api/actions', { method: 'POST', body: { action: 'fetch', confirmed: true } })).status, 409);
+    await request(`/api/jobs/${stop.json.id}/cancel`, { method: 'POST', body: {} });
+    release();
+    const job = await finished(request, stop.json.id);
+    assert.equal(job.status, 'cancelled');
+    assert.equal(stopped, 0);
+  } finally { release(); }
+});
+
+test('a process that has not yet exited produces a visible warning, not a false success', async t => {
+  const root = await fixture(t);
+  const processControl = { planProcessStop: async pid => fakeProcessPlan(pid), stopProcess: async plan => ({ pid: plan.pid, name: plan.name, status: 'requested', message: 'Stop requested; the process is still running. Refresh to check.' }) };
+  const { request, events } = await session(t, { root, demo: false, processControl });
+  const review = await request('/api/processes/plan', { method: 'POST', body: { pid: 54321 } });
+  const stop = await request('/api/processes/stop', { method: 'POST', body: { planId: review.json.id, confirmed: true } });
+  const job = await finished(request, stop.json.id);
+  assert.equal(job.status, 'completed');
+  assert.equal(job.result.status, 'requested');
+  assert.match(job.warnings.join(' '), /still running/);
+  assert.ok(events.some(event => event.action === 'process-stop' && event.status === 'warning' && /54321/.test(event.message)));
+});
+
+test('demo process stops only affect the current server sample list', async t => {
+  let realCalls = 0;
+  const processControl = { planProcessStop: async () => { realCalls++; throw new Error('Must not inspect a real process in demo.'); }, stopProcess: async () => { realCalls++; throw new Error('Must not stop a real process in demo.'); } };
+  const first = await session(t, { processControl });
+  const other = await session(t, { processControl });
+  const processList = await first.request('/api/processes');
+  const pid = processList.json.processes[0].pid;
+  assert.equal((await first.request('/api/processes/plan', { method: 'POST', body: { pid: 2147483647 } })).status, 400);
+  const plan = await first.request('/api/processes/plan', { method: 'POST', body: { pid } });
+  const stop = await first.request('/api/processes/stop', { method: 'POST', body: { planId: plan.json.id, confirmed: true } });
+  const job = await finished(first.request, stop.json.id);
+  assert.equal(job.result.demo, true);
+  assert.equal(job.result.status, 'stopped');
+  assert.equal((await first.request('/api/processes')).json.processes.some(item => item.pid === pid), false);
+  assert.equal((await first.request('/api/ports')).json.ports.some(item => item.pid === pid), false);
+  assert.equal((await other.request('/api/processes')).json.processes.some(item => item.pid === pid), true);
+  assert.equal(realCalls, 0);
+});
+
+
+test('native control routes enforce authentication, schema, review identity, and confirmation', async t => {
+  const root = await fixture(t); let received;
+  const plan = Object.freeze({ id: randomUUID(), action: 'dns', expiresAt: new Date(Date.now() + 60000).toISOString() });
+  const { request } = await session(t, { root, demo: false, network: {
+    getNetworkStatus: async () => ({ available: true, adapters: [], profiles: [] }),
+    planNetworkChange: async () => plan,
+    applyNetworkChange: async (value, options) => { received = value; assert.equal(options.confirmed, true); return { status: 'applied' }; },
+  } });
+  for (const route of ['/api/control', '/api/network', '/api/audio', '/api/security', '/api/settings', '/api/files/recovery', '/api/network/password', '/api/files/plan']) {
+    assert.equal((await request(route, { authenticated: false })).status, 401);
+  }
+  assert.equal((await request('/api/network')).json.available, true);
+  const post = (route, body) => request(route, { method: 'POST', body });
+  assert.equal((await post('/api/network/plan', { action: 'dns', command: 'arbitrary' })).status, 400);
+  assert.equal((await post('/api/network/plan', { action: 'dns' })).json.id, plan.id);
+  assert.equal((await post('/api/network/execute', { planId: plan.id })).status, 400);
+  assert.equal((await post('/api/settings/execute', { planId: plan.id, confirmed: true })).status, 400);
+  const started = await post('/api/network/execute', { planId: plan.id, confirmed: true });
+  assert.equal(started.status, 202);
+  assert.equal((await finished(request, started.json.id)).status, 'completed');
+  assert.equal(received, plan);
+  assert.equal((await post('/api/network/execute', { planId: plan.id, confirmed: true })).status, 400);
+  assert.equal((await request('/api/network/plan', { method: 'POST', body: {}, headers: { Origin: 'https://foreign.invalid' } })).status, 403);
+});
+
+test('a Wi-Fi password is returned exactly once per explicit request and never enters activity or jobs', async t => {
+  const root = await fixture(t); let reads = 0;
+  const secret = 'https://name:fixture-secret@example.invalid/password?token=fixture-test';
+  const { request, events } = await session(t, { root, demo: false, network: {
+    getWifiPassword: async value => { assert.equal(value.confirmed, true); reads++; return { password: secret }; },
+  } });
+  const post = body => request('/api/network/password', { method: 'POST', body });
+  assert.equal((await post({ profile: 'fixture' })).status, 400);
+  assert.equal((await post({ profile: 'fixture', confirmed: true, all: true })).status, 400);
+  const response = await post({ profile: 'fixture', adapterId: 'fixture', confirmed: true });
+  assert.equal(response.status, 200); assert.equal(response.json.password, secret);
+  assert.equal(response.headers['cache-control'], 'no-store'); assert.equal(reads, 1);
+  assert.doesNotMatch(JSON.stringify(events), /fixture-secret|password/);
+  assert.doesNotMatch((await request('/api/activity')).text, /fixture-secret/);
+});
+
+test('native scan warnings and monitoring cancellation remain explicit in jobs', async t => {
+  const root = await fixture(t); let cancelled = false;
+  const { request } = await session(t, { root, demo: false, security: {
+    planSecurityScan: async () => Object.freeze({ id: randomUUID(), expiresAt: new Date(Date.now() + 60000).toISOString() }),
+    runSecurityScan: async (_, { signal }) => {
+      if (!cancelled) return { status: 'attention-required', exitCode: 2, warnings: ['Defender requires review.'], message: 'Review Windows Security.' };
+      await new Promise(resolve => { if (signal.aborted) resolve(); else signal.addEventListener('abort', resolve, { once: true }); });
+      return { status: 'monitoring-stopped', cancelled: true, scanMayContinue: true, warnings: ['Defender may continue scanning.'] };
+    },
+  } });
+  const start = async () => {
+    const plan = await request('/api/security/plan', { method: 'POST', body: { type: 'quick' } });
+    return (await request('/api/security/scan', { method: 'POST', body: { planId: plan.json.id, confirmed: true } })).json.id;
+  };
+  const first = await finished(request, await start());
+  assert.equal(first.result.status, 'attention-required'); assert.match(first.warnings.join(' '), /requires review/);
+  cancelled = true; const id = await start();
+  await request(`/api/jobs/${id}/cancel`, { method: 'POST', body: {} });
+  const result = await finished(request, id);
+  assert.equal(result.status, 'cancelled'); assert.equal(result.result.scanMayContinue, true);
+  assert.match(result.error, /Monitoring stopped/);
+});
+
+test('immediate sound changes serialize with jobs and report failures without false success', async t => {
+  const root = await fixture(t); let release, started, changes = 0;
+  const began = new Promise(resolve => { started = resolve; });
+  const { request } = await session(t, { root, demo: false, audio: {
+    setAudioSettings: async () => { changes++; started(); await new Promise(resolve => { release = resolve; }); return { available: true, volume: 20 }; },
+  } });
+  const pending = request('/api/audio', { method: 'POST', body: { volume: 20, confirmed: true } });
+  await began;
+  assert.equal((await request('/api/audio', { method: 'POST', body: { volume: 30, confirmed: true } })).status, 409);
+  assert.equal((await request('/api/audio', { method: 'POST', body: { volume: 30 } })).status, 400);
+  release(); assert.equal((await pending).json.volume, 20); assert.equal(changes, 1);
+});
+
+test('file API exposes a minimal review and performs a confirmed fixture folder operation', async t => {
+  const root = await fixture(t); const { request } = await session(t, { root, demo: false });
+  const post = (route, body) => request(route, { method: 'POST', body });
+  const response = await post('/api/files/plan', { action: 'mkdir', path: 'nested', name: 'new folder' });
+  assert.equal(response.status, 200, response.text);
+  assert.equal(response.json.destination, path.join(await realpath(root), 'nested', 'new folder'));
+  assert.equal(response.json.entries, undefined); assert.equal(response.json.recovery, undefined); assert.equal(response.json.root, undefined);
+  assert.equal((await post('/api/files/execute', { planId: response.json.id })).status, 400);
+  const started = await post('/api/files/execute', { planId: response.json.id, confirmed: true });
+  assert.equal((await finished(request, started.json.id)).status, 'completed');
+  assert.ok((await request('/api/files?path=nested')).json.entries.some(item => item.name === 'new folder'));
+  for (const body of [{ action: 'trash', path: '../outside' }, { action: 'mkdir', path: 'nested', name: '../escape' }, { action: 'mkdir', path: '.git', name: 'unsafe' }]) assert.equal((await post('/api/files/plan', body)).status, 400);
+});
+
+test('demo native controls never inspect or modify the host computer', async t => {
+  const unexpected = () => { throw new Error('Real native controls must not execute in demo'); };
+  const { request } = await session(t, { network: { getNetworkStatus: unexpected, getWifiPassword: unexpected }, audio: { getAudioStatus: unexpected, setAudioSettings: unexpected } });
+  assert.equal((await request('/api/network')).json.available, false);
+  assert.equal((await request('/api/audio')).json.available, false);
+  assert.deepEqual((await request('/api/files/recovery')).json, []);
+  assert.equal((await request('/api/network/password', { method: 'POST', body: { confirmed: true } })).status, 400);
+  assert.equal((await request('/api/audio', { method: 'POST', body: { volume: 10, confirmed: true } })).status, 400);
 });

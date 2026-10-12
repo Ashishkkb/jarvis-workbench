@@ -53,7 +53,7 @@ export const RECIPES = [
   {
     id: 'processes', title: 'See what is running', category: 'System', screen: 'processes',
     description: 'Inspect process names, memory, and CPU information.',
-    explanation: 'The Processes view shows running programs and memory use without requiring ps flags. CPU is reported as a percentage on Linux and macOS, and as cumulative CPU seconds on Windows. This dashboard only inspects processes.',
+    explanation: 'The Processes view shows running programs and memory use without requiring ps flags. CPU is reported as a percentage on Linux and macOS, and as cumulative CPU seconds on Windows. Select a process and press K to review a stop request. Only your own eligible processes can be stopped; unsaved work can be lost. Windows terminates immediately, while Linux and macOS send SIGTERM without automatic escalation.',
     examples: [{ command: 'ps -axo pid,comm,%cpu,rss', explanation: 'Lists process IDs, executable names, CPU percentage, and memory in KiB on Linux and macOS.' }],
   },
   {
