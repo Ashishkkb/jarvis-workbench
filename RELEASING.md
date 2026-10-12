@@ -1,6 +1,6 @@
 # Releasing Jarvis Workbench
 
-The repository produces an npm-compatible tarball without contacting a registry. The public npm package is not published yet. The release workflow produces downloadable GitHub Actions artifacts; it does not publish to npm or create a public GitHub Release.
+The public package identity is `@ashishkkb/jarvis-workbench`. The repository produces an npm-compatible tarball without contacting a registry. Registry publication is a separate, intentional step using the exact validated archive. The release workflow produces downloadable GitHub Actions artifacts; it does not publish to npm or create a public GitHub Release.
 
 ## Release gate
 
@@ -38,6 +38,18 @@ The workflow uses only read access to the repository and GitHub's built-in artif
 4. Confirm that Wi-Fi passwords require explicit confirmation and are never included in activity output, job results, URLs, diagnostics or release artifacts.
 5. Review the changes and release notes against the actual implemented behavior. State limitations and known issues; do not claim universal device support or a clean malware result from an exit code alone.
 6. Confirm ownership of the intended npm scope and GitHub destination. Registry publication is a separate action. If approved, publish the exact validated archive, not a newly packed working directory, and verify its installed version after publication.
+
+## Install a registry version
+
+After publication has been verified, install the exact version with:
+
+```sh
+npm install --global @ashishkkb/jarvis-workbench@0.3.0
+jarvis --version
+jarvis doctor
+```
+
+This selects version 0.3.0 independently of npm distribution tags. Restart running Jarvis sessions after an update. Installing an earlier published version rolls the code back; it does not undo system settings or file changes.
 
 ## Install, update and roll back from an archive
 

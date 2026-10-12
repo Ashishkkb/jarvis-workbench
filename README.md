@@ -6,6 +6,17 @@ A local terminal and browser dashboard for finding text, understanding Git, mana
 
 Created by **Ashish / [Ashishkkb](https://github.com/Ashishkkb)**. This is an independent, open-source project. Voice integration is separate and is not included.
 
+## Install from npm
+
+Use Node.js 22 or 24. Install the exact version:
+
+```sh
+npm install --global @ashishkkb/jarvis-workbench@0.3.0
+jarvis
+```
+
+For the browser dashboard, run `jarvis --web`. In PowerShell, use `npm.cmd` and `jarvis.cmd` if execution policy blocks the generated `.ps1` launchers; no policy change is needed.
+
 ## Install from source
 
 The standalone Windows checkout is `D:\jarvis-workbench`. In a source checkout on any supported platform:
@@ -28,7 +39,7 @@ node ./bin/jarvis.js --web --path ../my-project
 node ./bin/jarvis.js --demo
 ```
 
-The planned npm package is `@ashishkkb/jarvis-workbench`. **It has not been published to the npm registry.** `npm install -g .` installs this local checkout; it does not download a registry release.
+`npm install -g .` installs this local checkout. Use the versioned package command above to install from the npm registry.
 
 ## Two ways to work
 
@@ -157,7 +168,7 @@ jarvis --demo --snapshot --screen git --width 110
 
 `status`, `search`, `files`, `disk`, `locations`, `scan`, `processes`, `ports`, `network`, `sound`, `security`, and `settings` support `--json`. The `disk` command is the quick workspace summary; `locations` lists scan choices and `scan --path folder` performs the longer metadata scan. On Windows, a drive can be selected with `jarvis scan --path C:\ --json`. Recovery actions are available in the dashboards and storage API. `doctor` checks Node, Git, and optional ripgrep. Use `--` before a search phrase that starts with a dash. Run `jarvis --help` for the complete command list.
 
-Before a registry release, ES modules can import the checkout directly:
+ES modules can import the source checkout directly:
 
 ```js
 import { searchContent, getGitStatus } from './src/index.js';
