@@ -1,0 +1,25 @@
+{
+  "name": "@ashishkkb/jarvis-workbench",
+  "version": "0.1.0",
+  "description": "A keyboard-driven terminal workbench for search, files, Git and system tasks. No API key required.",
+  "type": "module",
+  "bin": { "jarvis": "bin/jarvis.js", "jv": "bin/jarvis.js" },
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js", "./ui": "./src/ui.js" },
+  "files": ["bin", "src", "web", "scripts/check.js", "support.json", "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md"],
+  "engines": { "node": ">=22" },
+  "author": "Ashish (Ashishkkb)",
+  "repository": { "type": "git", "url": "git+https://github.com/Ashishkkb/jarvis-workbench.git" },
+  "homepage": "https://github.com/Ashishkkb/jarvis-workbench#readme",
+  "bugs": "https://github.com/Ashishkkb/jarvis-workbench/issues",
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "start": "node bin/jarvis.js",
+    "demo": "node bin/jarvis.js --demo",
+    "test": "node --test",
+    "check": "node scripts/check.js",
+    "preview": "node bin/jarvis.js --demo --snapshot"
+  },
+  "keywords": ["terminal", "tui", "dashboard", "git", "grep", "cli", "developer-tools"],
+  "license": "Apache-2.0"
+}
